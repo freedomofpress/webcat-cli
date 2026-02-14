@@ -17,26 +17,22 @@ on:
         type: string
         required: false
         default: "20"
-      webcat_path:
+      enrollment_path:
         type: string
         required: false
-        default: ".well-known/webcat/"
-      enrollment_file:
+        default: ".well-known/webcat/enrollment.json"
+      enrollment_prev_path:
         type: string
         required: false
-        default: "enrollment.json"
-      enrollment_prev_file:
+        default: ".well-known/webcat/enrollment-prev.json"
+      bundle_path:
         type: string
         required: false
-        default: "enrollment-prev.json"
-      bundle_file:
+        default: ".well-known/webcat/bundle.json"
+      bundle_prev_path:
         type: string
         required: false
-        default: "bundle.json"
-      bundle_prev_file:
-        type: string
-        required: false
-        default: "bundle-prev.json"
+        default: ".well-known/webcat/bundle-prev.json"
 
 
 permissions:
@@ -79,10 +75,10 @@ jobs:
           IDENTITY: ${{ inputs.identity }}
           MAX_AGE: ${{ inputs.max_age }}
           WEBCAT_PATH: ${{ inputs.webcat_path }}
-          ENROLLMENT_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_file }}
-          ENROLLMENT_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_prev_file }}
-          BUNDLE_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_file }}
-          BUNDLE_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_prev_file }}
+          ENROLLMENT_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_path }}
+          ENROLLMENT_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_prev_path }}
+          BUNDLE_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_path }}
+          BUNDLE_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_prev_path }}
         run: |
           set -euo pipefail
 
@@ -126,7 +122,7 @@ jobs:
           ISSUER: ${{ inputs.issuer }}
           IDENTITY: ${{ inputs.identity }}
           MAX_AGE: ${{ inputs.max_age }}
-          ENROLLMENT_PATH: ${{ inputs.webcat_path }}/${{ inputs.enrollment_file }}
+          ENROLLMENT_PATH: ${{ inputs.webcat_path }}/${{ inputs.enrollment_path }}
         run: |
           set -euo pipefail
 
