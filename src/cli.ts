@@ -53,6 +53,47 @@ const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
 const SIGSTORE_OIDC_CLIENT_ID = "sigstore";
 const SIGSTORE_OIDC_SCOPE = "openid email";
 
+export const SIGSTORE_CLAIM_OIDS = {
+  // Standard X.509
+  subjectAltName: "2.5.29.17",
+
+  // Fulcio base
+  issuerV1: "1.3.6.1.4.1.57264.1.1",
+  workflowTriggerLegacy: "1.3.6.1.4.1.57264.1.2",
+  workflowShaLegacy: "1.3.6.1.4.1.57264.1.3",
+  workflowNameLegacy: "1.3.6.1.4.1.57264.1.4",
+  workflowRepositoryLegacy: "1.3.6.1.4.1.57264.1.5",
+  workflowRefLegacy: "1.3.6.1.4.1.57264.1.6",
+
+  // Current issuer
+  issuerV2: "1.3.6.1.4.1.57264.1.8",
+
+  // Workflow identity
+  buildSignerUri: "1.3.6.1.4.1.57264.1.9",
+  buildSignerDigest: "1.3.6.1.4.1.57264.1.10",
+  runnerEnvironment: "1.3.6.1.4.1.57264.1.11",
+
+  // Source repository
+  sourceRepositoryUri: "1.3.6.1.4.1.57264.1.12",
+  sourceRepositoryDigest: "1.3.6.1.4.1.57264.1.13",
+  sourceRepositoryRef: "1.3.6.1.4.1.57264.1.14",
+  sourceRepositoryIdentifier: "1.3.6.1.4.1.57264.1.15",
+  sourceRepositoryOwnerUri: "1.3.6.1.4.1.57264.1.16",
+  sourceRepositoryOwnerIdentifier: "1.3.6.1.4.1.57264.1.17",
+
+  // Build config
+  buildConfigUri: "1.3.6.1.4.1.57264.1.18",
+  buildConfigDigest: "1.3.6.1.4.1.57264.1.19",
+
+  // Execution context
+  buildTrigger: "1.3.6.1.4.1.57264.1.20",
+  runInvocationUri: "1.3.6.1.4.1.57264.1.21",
+  sourceRepositoryVisibilityAtSigning: "1.3.6.1.4.1.57264.1.22",
+  deploymentEnvironment: "1.3.6.1.4.1.57264.1.23",
+} as const;
+
+type SigstoreClaimOption = { oid: string; value: string };
+
 type DeviceAuthResponse = {
   device_code: string;
   user_code: string;
@@ -83,6 +124,45 @@ async function writeMaybe(filePath: string | undefined, contents: string): Promi
 function collectSigner(value: string, previous: string[]): string[] {
   previous.push(value);
   return previous;
+}
+
+
+function collectClaim(value: string, previous: SigstoreClaimOption[]): SigstoreClaimOption[] {
+  const separatorIndex = value.indexOf("=");
+  if (separatorIndex <= 0) {
+    throw new Error("--claim values must be in OID=value format");
+  }
+  const oid = value.slice(0, separatorIndex).trim();
+  const claimValue = value.slice(separatorIndex + 1).trim();
+  if (!/^\d+(?:\.\d+)+$/.test(oid)) {
+    throw new Error(`--claim key must be an OID, got '${oid}'`);
+  }
+  if (!claimValue) {
+    throw new Error("--claim value must be non-empty");
+  }
+  previous.push({ oid, value: claimValue });
+  return previous;
+}
+
+function setClaim(
+  previous: SigstoreClaimOption[] | undefined,
+  oid: string,
+  value: string,
+): SigstoreClaimOption[] {
+  const claims = previous ?? [];
+  claims.push({ oid, value: value.trim() });
+  return claims;
+}
+
+function claimsToRecord(claims: SigstoreClaimOption[]): Record<string, string> {
+  const record: Record<string, string> = {};
+  for (const claim of claims) {
+    if (!claim.value) {
+      throw new Error(`claim value for OID '${claim.oid}' must be non-empty`);
+    }
+    record[claim.oid] = claim.value;
+  }
+  return record;
 }
 
 async function fetchSigstoreCommunityTrustedRoot(): Promise<string> {
@@ -285,8 +365,136 @@ enrollment
   .option("--type <type>", "Enrollment type (sigsum or sigstore)", "sigsum")
   .option("--trusted-root <path>", "Sigstore trusted root file")
   .option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF")
-  .option("--issuer <value>", "Sigstore issuer")
-  .option("--identity <value>", "Sigstore identity")
+  .option("--issuer <value>", "Sigstore issuer (maps to OID 1.3.6.1.4.1.57264.1.8)")
+  .option("--identity <value>", "Sigstore identity (maps to OID 2.5.29.17)")
+  .option("--claim <oid=value>", "Sigstore claim constraint by OID", collectClaim, [] as SigstoreClaimOption[])
+  .option(
+    "--subject-alt-name <value>",
+    "Sigstore claim OID 2.5.29.17 (Subject Alternative Name)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.subjectAltName, value),
+  )
+  .option(
+    "--issuer-v1 <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.1 (Fulcio Issuer V1)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.issuerV1, value),
+  )
+  .option(
+    "--issuer-v2 <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.8 (Fulcio Issuer V2)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.issuerV2, value),
+  )  
+  .option(
+    "--build-signer-uri <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.9",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildSignerUri, value),
+  )
+  .option(
+    "--build-signer-digest <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.10",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildSignerDigest, value),
+  )
+  .option(
+    "--runner-environment <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.11",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.runnerEnvironment, value),
+  )
+  .option(
+    "--source-repository-uri <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.12",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryUri, value),
+  )
+  .option(
+    "--source-repository-digest <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.13",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryDigest, value),
+  )
+  .option(
+    "--source-repository-ref <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.14",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryRef, value),
+  )
+  .option(
+    "--source-repository-identifier <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.15",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryIdentifier, value),
+  )
+  .option(
+    "--source-repository-owner-uri <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.16",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryOwnerUri, value),
+  )
+  .option(
+    "--source-repository-owner-identifier <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.17",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryOwnerIdentifier, value),
+  )
+  .option(
+    "--build-config-uri <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.18",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildConfigUri, value),
+  )
+  .option(
+    "--build-config-digest <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.19",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildConfigDigest, value),
+  )
+  .option(
+    "--build-trigger <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.20",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildTrigger, value),
+  )
+  .option(
+    "--run-invocation-uri <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.21",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.runInvocationUri, value),
+  )
+  .option(
+    "--source-repository-visibility-at-signing <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.22",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryVisibilityAtSigning, value),
+  )
+  .option(
+    "--deployment-environment <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.23",
+    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.deploymentEnvironment, value),
+  )
+  .option(
+    "--workflow-trigger-legacy <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.2 (Legacy Workflow Trigger)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowTriggerLegacy, value),
+  )
+
+  .option(
+    "--workflow-sha-legacy <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.3 (Legacy Workflow SHA)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowShaLegacy, value),
+  )
+
+  .option(
+    "--workflow-name-legacy <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.4 (Legacy Workflow Name)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowNameLegacy, value),
+  )
+
+  .option(
+    "--workflow-repository-legacy <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.5 (Legacy Workflow Repository)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowRepositoryLegacy, value),
+  )
+
+  .option(
+    "--workflow-ref-legacy <value>",
+    "Sigstore claim OID 1.3.6.1.4.1.57264.1.6 (Legacy Workflow Ref)",
+    (value: string, previous: SigstoreClaimOption[]) =>
+      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowRefLegacy, value),
+  )
   .option("-o, --output <path>", "Write result to file instead of stdout")
   .action(async (options: {
     policyFile?: string;
@@ -299,6 +507,7 @@ enrollment
     communityTrustedRoot?: boolean;
     issuer?: string;
     identity?: string;
+    claim: SigstoreClaimOption[];
     output?: string;
   }) => {
     const enrollmentType = options.type ?? "sigsum";
@@ -352,14 +561,20 @@ enrollment
       if (!options.trustedRoot && !options.communityTrustedRoot) {
         throw new Error("--trusted-root or --community-trusted-root is required for sigstore enrollments");
       }
-      if (!options.issuer) {
-        throw new Error("--issuer is required for sigstore enrollments");
-      }
-      if (!options.identity) {
-        throw new Error("--identity is required for sigstore enrollments");
-      }
       if (!options.maxAge) {
         throw new Error("--max-age is required for sigstore enrollments");
+      }
+      const claims: SigstoreClaimOption[] = [...(options.claim ?? [])];
+      if (options.identity) {
+        setClaim(claims, SIGSTORE_CLAIM_OIDS.subjectAltName, options.identity);
+      }
+      if (options.issuer) {
+        setClaim(claims, SIGSTORE_CLAIM_OIDS.issuerV2, options.issuer);
+      }
+      if (claims.length === 0) {
+        throw new Error(
+          "at least one sigstore claim is required (use --claim and/or --identity/--issuer)",
+        );
       }
       let trustedRoot: Record<string, unknown>;
       if (options.communityTrustedRoot) {
@@ -380,8 +595,7 @@ enrollment
       enrollmentObject = buildEnrollmentObject({
         type: "sigstore",
         trustedRoot,
-        issuer: options.issuer,
-        identity: options.identity,
+        claims: claimsToRecord(claims),
         maxAge: options.maxAge,
       });
     }

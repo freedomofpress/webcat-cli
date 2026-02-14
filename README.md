@@ -61,7 +61,7 @@ To learn more about Sigsum and how to write a policy, see Sigsum's [_Getting Sta
 If you choose Sigstore, WEBCAT provides GitHub Actions that support automated deployments.
 
 > [!WARNING]
-> Sigstore support is still a work in progress. Custom claims are not yet supported, but will be added soon.
+> Sigstore support is still a work in progress. Claim-based enrollment constraints are supported.
 
 In theory, WEBCAT also supports a bring-your-own Sigstore deployment. This is not documented here due to its complexity. This guide assumes you are using the Sigstore [_Public Good_ instance](https://openssf.org/blog/2023/10/03/running-sigstore-as-a-managed-service-a-tour-of-sigstores-public-good-instance/), the same one used by GitHub and public container registries.
 
@@ -75,7 +75,7 @@ The Sigstore workflow consists of two actions:
     *(This submission step will soon be integrated directly into the CLI.)*
 
 > [!CAUTION]
-> Currently, verification is based on the GitHub workflow identity (workflow name). This has known security limitations until custom claims are supported, but is acceptable while WEBCAT is in alpha.
+> Sigstore enrollments support claim-based constraints using certificate extension OIDs.
 
 * Manifest Update Action - [Example Usage](https://github.com/freedomofpress/webcat-demo-test/blob/main/.github/workflows/generate-sign-sigstore-manifest.yaml)
 
@@ -122,8 +122,9 @@ go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 ## Enrollment helpers
 
 The `enrollment` namespace manages Sigsum or Sigstore enrollment payloads. Sigsum enrollments
-are the default; use `--type sigstore` along with `--issuer`, `--identity`, and either
-`--trusted-root` or `--community-trusted-root` to build Sigstore enrollments.
+are the default; use `--type sigstore` along with Sigstore claim constraints (`--claim`
+and/or compatibility flags `--issuer` + `--identity`) and either `--trusted-root` or
+`--community-trusted-root` to build Sigstore enrollments.
 
 | Command | Purpose |
 | --- | --- |
@@ -142,6 +143,19 @@ The canonicalized document (useful for audits) can be produced with:
 
 ```sh
 npx tsx src/cli.ts enrollment canonicalize -i examples/enrollment.json
+```
+
+Sigstore enrollment example with claims (legacy `--identity` and `--issuer` are mapped to claims):
+
+```sh
+npx tsx src/cli.ts enrollment create \
+  --type sigstore \
+  --community-trusted-root \
+  --identity alice@example.com \
+  --issuer https://token.actions.githubusercontent.com \
+  --build-signer-uri https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --claim 1.3.6.1.4.1.57264.1.11=platform-hosted \
+  --max-age 3600
 ```
 
 ## Manifest helpers
