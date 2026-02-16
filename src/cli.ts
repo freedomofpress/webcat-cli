@@ -368,148 +368,36 @@ enrollment
   .option("--issuer <value>", "Sigstore issuer (maps to OID 1.3.6.1.4.1.57264.1.8)")
   .option("--identity <value>", "Sigstore identity (maps to OID 2.5.29.17)")
   .option("--claim <oid=value>", "Sigstore claim constraint by OID", collectClaim, [] as SigstoreClaimOption[])
-  .option(
-    "--subject-alt-name <value>",
-    "Sigstore claim OID 2.5.29.17 (Subject Alternative Name)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.subjectAltName, value),
-  )
-  .option(
-    "--issuer-v1 <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.1 (Fulcio Issuer V1)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.issuerV1, value),
-  )
-  .option(
-    "--issuer-v2 <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.8 (Fulcio Issuer V2)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.issuerV2, value),
-  )  
-  .option(
-    "--build-signer-uri <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.9",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildSignerUri, value),
-  )
-  .option(
-    "--build-signer-digest <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.10",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildSignerDigest, value),
-  )
-  .option(
-    "--runner-environment <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.11",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.runnerEnvironment, value),
-  )
-  .option(
-    "--source-repository-uri <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.12",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryUri, value),
-  )
-  .option(
-    "--source-repository-digest <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.13",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryDigest, value),
-  )
-  .option(
-    "--source-repository-ref <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.14",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryRef, value),
-  )
-  .option(
-    "--source-repository-identifier <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.15",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryIdentifier, value),
-  )
-  .option(
-    "--source-repository-owner-uri <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.16",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryOwnerUri, value),
-  )
-  .option(
-    "--source-repository-owner-identifier <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.17",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryOwnerIdentifier, value),
-  )
-  .option(
-    "--build-config-uri <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.18",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildConfigUri, value),
-  )
-  .option(
-    "--build-config-digest <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.19",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildConfigDigest, value),
-  )
-  .option(
-    "--build-trigger <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.20",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.buildTrigger, value),
-  )
-  .option(
-    "--run-invocation-uri <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.21",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.runInvocationUri, value),
-  )
-  .option(
-    "--source-repository-visibility-at-signing <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.22",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.sourceRepositoryVisibilityAtSigning, value),
-  )
-  .option(
-    "--deployment-environment <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.23",
-    (value: string, previous: SigstoreClaimOption[]) => setClaim(previous, SIGSTORE_CLAIM_OIDS.deploymentEnvironment, value),
-  )
-  .option(
-    "--workflow-trigger-legacy <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.2 (Legacy Workflow Trigger)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowTriggerLegacy, value),
-  )
+  .option("--source-repository-uri <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.12")
+  .option("--source-repository-digest <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.13")
+  .option("--source-repository-ref <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.14")
+  .option("--source-repository-identifier <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.15")
+  .option("--source-repository-owner-uri <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.16")
+  .option("--source-repository-owner-identifier <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.17")
 
-  .option(
-    "--workflow-sha-legacy <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.3 (Legacy Workflow SHA)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowShaLegacy, value),
-  )
+  .option("--build-signer-uri <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.9")
+  .option("--build-signer-digest <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.10")
+  .option("--runner-environment <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.11")
 
-  .option(
-    "--workflow-name-legacy <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.4 (Legacy Workflow Name)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowNameLegacy, value),
-  )
+  .option("--build-config-uri <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.18")
+  .option("--build-config-digest <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.19")
 
-  .option(
-    "--workflow-repository-legacy <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.5 (Legacy Workflow Repository)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowRepositoryLegacy, value),
-  )
+  .option("--build-trigger <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.20")
+  .option("--run-invocation-uri <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.21")
+  .option("--source-repository-visibility-at-signing <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.22")
+  .option("--deployment-environment <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.23")
 
-  .option(
-    "--workflow-ref-legacy <value>",
-    "Sigstore claim OID 1.3.6.1.4.1.57264.1.6 (Legacy Workflow Ref)",
-    (value: string, previous: SigstoreClaimOption[]) =>
-      setClaim(previous, SIGSTORE_CLAIM_OIDS.workflowRefLegacy, value),
-  )
+  .option("--issuer-v1 <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.1")
+  .option("--issuer-v2 <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.8")
+  .option("--subject-alt-name <value>", "Sigstore claim OID 2.5.29.17")
+
+  .option("--workflow-trigger-legacy <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.2")
+  .option("--workflow-sha-legacy <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.3")
+  .option("--workflow-name-legacy <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.4")
+  .option("--workflow-repository-legacy <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.5")
+  .option("--workflow-ref-legacy <value>", "Sigstore claim OID 1.3.6.1.4.1.57264.1.6")
   .option("-o, --output <path>", "Write result to file instead of stdout")
-  .action(async (options: {
-    policyFile?: string;
-    signer: string[];
-    threshold?: number | string;
-    maxAge?: number | string;
-    casUrl?: string;
-    type?: string;
-    trustedRoot?: string;
-    communityTrustedRoot?: boolean;
-    issuer?: string;
-    identity?: string;
-    claim: SigstoreClaimOption[];
-    output?: string;
-  }) => {
+  .action(async (options: any) => {
     const enrollmentType = options.type ?? "sigsum";
     if (enrollmentType !== "sigsum" && enrollmentType !== "sigstore") {
       throw new Error("enrollment type must be 'sigsum' or 'sigstore'");
@@ -565,12 +453,47 @@ enrollment
         throw new Error("--max-age is required for sigstore enrollments");
       }
       const claims: SigstoreClaimOption[] = [...(options.claim ?? [])];
-      if (options.identity) {
-        setClaim(claims, SIGSTORE_CLAIM_OIDS.subjectAltName, options.identity);
-      }
-      if (options.issuer) {
-        setClaim(claims, SIGSTORE_CLAIM_OIDS.issuerV2, options.issuer);
-      }
+
+      // helper
+      const add = (oid: string, value?: string) => {
+        if (value) {
+          claims.push({ oid, value: String(value).trim() });
+        }
+      };
+
+      // baseline
+      add(SIGSTORE_CLAIM_OIDS.subjectAltName, options.identity);
+      add(SIGSTORE_CLAIM_OIDS.subjectAltName, options.subjectAltName);
+
+      add(SIGSTORE_CLAIM_OIDS.issuerV2, options.issuerV2 ?? options.issuer);
+      add(SIGSTORE_CLAIM_OIDS.issuerV1, options.issuerV1);
+
+      // structured OIDs
+      add(SIGSTORE_CLAIM_OIDS.buildSignerUri, options.buildSignerUri);
+      add(SIGSTORE_CLAIM_OIDS.buildSignerDigest, options.buildSignerDigest);
+      add(SIGSTORE_CLAIM_OIDS.runnerEnvironment, options.runnerEnvironment);
+
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryUri, options.sourceRepositoryUri);
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryDigest, options.sourceRepositoryDigest);
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryRef, options.sourceRepositoryRef);
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryIdentifier, options.sourceRepositoryIdentifier);
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryOwnerUri, options.sourceRepositoryOwnerUri);
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryOwnerIdentifier, options.sourceRepositoryOwnerIdentifier);
+
+      add(SIGSTORE_CLAIM_OIDS.buildConfigUri, options.buildConfigUri);
+      add(SIGSTORE_CLAIM_OIDS.buildConfigDigest, options.buildConfigDigest);
+
+      add(SIGSTORE_CLAIM_OIDS.buildTrigger, options.buildTrigger);
+      add(SIGSTORE_CLAIM_OIDS.runInvocationUri, options.runInvocationUri);
+      add(SIGSTORE_CLAIM_OIDS.sourceRepositoryVisibilityAtSigning, options.sourceRepositoryVisibilityAtSigning);
+      add(SIGSTORE_CLAIM_OIDS.deploymentEnvironment, options.deploymentEnvironment);
+
+      add(SIGSTORE_CLAIM_OIDS.workflowTriggerLegacy, options.workflowTriggerLegacy);
+      add(SIGSTORE_CLAIM_OIDS.workflowShaLegacy, options.workflowShaLegacy);
+      add(SIGSTORE_CLAIM_OIDS.workflowNameLegacy, options.workflowNameLegacy);
+      add(SIGSTORE_CLAIM_OIDS.workflowRepositoryLegacy, options.workflowRepositoryLegacy);
+      add(SIGSTORE_CLAIM_OIDS.workflowRefLegacy, options.workflowRefLegacy);
+
       if (claims.length === 0) {
         throw new Error(
           "at least one sigstore claim is required (use --claim and/or --identity/--issuer)",
