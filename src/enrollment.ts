@@ -25,8 +25,7 @@ export interface SigsumEnrollmentInput {
 export interface SigstoreEnrollmentInput {
   type: "sigstore";
   trusted_root: Record<string, unknown>;
-  identity: string;
-  issuer: string;
+  claims: Record<string, string>;
   max_age: number;
 }
 
@@ -45,8 +44,7 @@ export interface SigsumEnrollmentOptions {
 export interface SigstoreEnrollmentOptions {
   type: "sigstore";
   trustedRoot: Record<string, unknown>;
-  identity: string;
-  issuer: string;
+  claims: Record<string, string>;
   maxAge: number | string;
 }
 
@@ -65,8 +63,7 @@ export function buildEnrollmentObject(options: EnrollmentOptions): EnrollmentInp
     return {
       type,
       trusted_root: ensureObject(sigstoreOptions.trustedRoot, "trusted_root"),
-      identity: ensureNonEmptyString(sigstoreOptions.identity, "identity"),
-      issuer: ensureNonEmptyString(sigstoreOptions.issuer, "issuer"),
+      claims: normalizeSigstoreClaims(sigstoreOptions.claims, "claims"),
       max_age: parsedMaxAge,
     };
   }
@@ -119,8 +116,7 @@ export function parseEnrollmentObject(parsed: any): EnrollmentInput {
     return {
       type: "sigstore",
       trusted_root: ensureObject(parsed.trusted_root, "enrollment.trusted_root"),
-      identity: ensureNonEmptyString(parsed.identity, "enrollment.identity"),
-      issuer: ensureNonEmptyString(parsed.issuer, "enrollment.issuer"),
+      claims: normalizeSigstoreClaims(parsed.claims, "enrollment.claims"),
       max_age: maxAge,
     };
   }
@@ -163,6 +159,19 @@ export function parseEnrollmentObject(parsed: any): EnrollmentInput {
     cas_url: parsed.cas_url,
     ...(normalizedLogs ? { logs: normalizedLogs } : {}),
   };
+}
+
+function normalizeSigstoreClaims(
+  value: unknown,
+  fieldName: string,
+): Record<string, string> {
+  const claims = ensureRecordOfStrings(value, fieldName);
+  for (const oid of Object.keys(claims)) {
+    if (!/^\d+(?:\.\d+)+$/.test(oid)) {
+      throw new Error(`${fieldName} keys must be valid OID strings`);
+    }
+  }
+  return claims;
 }
 
 export async function loadEnrollment(path: string): Promise<EnrollmentInput> {

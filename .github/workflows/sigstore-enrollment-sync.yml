@@ -3,41 +3,149 @@ name: Sync Sigstore Enrollment
 on:
   workflow_call:
     inputs:
-      issuer:
+      # Source repository
+      source-repository-uri:
+        description: "OID 1.3.6.1.4.1.57264.1.12"
         type: string
-        required: true
-      identity:
-        type: string
-        required: true
-      max_age:
+        required: true  
+
+      # This is defaulted to this repository for this workflow to be invoked directly
+      # from a third party one.
+      build-signer-uri:
+        description: "OID 1.3.6.1.4.1.57264.1.9"
         type: string
         required: false
-        default: "15552000"
+        default: "https://github.com/freedomofpress/webcat-cli/.github/workflows/webcat-generate-and-commit-manifest.yml@refs/heads/main"
+
+      # Github default
+      issuer-v2:
+        description: "Fulcio Issuer V2 (OID 1.3.6.1.4.1.57264.1.8)"
+        type: string
+        required: false
+        default: "https://token.actions.githubusercontent.com"
+
+      max_age:
+        description: "Maximum enrollment validity in seconds"
+        type: string
+        required: false
+        default: "15552000" # 180 days
+
+      enrollment_path:
+        description: "Path to enrollment.json"
+        type: string
+        required: false
+        default: ".well-known/webcat/enrollment.json"
+
+      enrollment_prev_path:
+        description: "Path to enrollment-prev.json"
+        type: string
+        required: false
+        default: ".well-known/webcat/enrollment-prev.json"
+
+      bundle_path:
+        description: "Path to bundle.json"
+        type: string
+        required: false
+        default: ".well-known/webcat/bundle.json"
+
+      bundle_prev_path:
+        description: "Path to bundle-prev.json"
+        type: string
+        required: false
+        default: ".well-known/webcat/bundle-prev.json"
+
       node_version:
+        description: "Node.js version for webcat-cli"
         type: string
         required: false
         default: "20"
-      webcat_path:
-        type: string
-        required: false
-        default: ".well-known/webcat/"
-      enrollment_file:
-        type: string
-        required: false
-        default: "enrollment.json"
-      enrollment_prev_file:
-        type: string
-        required: false
-        default: "enrollment-prev.json"
-      bundle_file:
-        type: string
-        required: false
-        default: "bundle.json"
-      bundle_prev_file:
-        type: string
-        required: false
-        default: "bundle-prev.json"
 
+      issuer-v1:
+        description: "Fulcio Issuer V1 (OID 1.3.6.1.4.1.57264.1.1)"
+        type: string
+        required: false
+        default: "https://token.actions.githubusercontent.com"
+
+      build-signer-digest:
+        description: "OID 1.3.6.1.4.1.57264.1.10"
+        type: string
+        required: false
+
+      runner-environment:
+        description: "OID 1.3.6.1.4.1.57264.1.11"
+        type: string
+        required: false
+        default: "github-hosted"
+
+      source-repository-digest:
+        description: "OID 1.3.6.1.4.1.57264.1.13"
+        type: string
+        required: false
+
+      source-repository-ref:
+        description: "OID 1.3.6.1.4.1.57264.1.14"
+        type: string
+        default: "refs/heads/main"
+        required: true
+
+      source-repository-identifier:
+        description: "OID 1.3.6.1.4.1.57264.1.15"
+        type: string
+        required: false
+
+      source-repository-owner-uri:
+        description: "OID 1.3.6.1.4.1.57264.1.16"
+        type: string
+        required: false
+
+      source-repository-owner-identifier:
+        description: "OID 1.3.6.1.4.1.57264.1.17"
+        type: string
+        required: false
+
+      build-config-uri:
+        description: "OID 1.3.6.1.4.1.57264.1.18"
+        type: string
+        required: false
+
+      build-config-digest:
+        description: "OID 1.3.6.1.4.1.57264.1.19"
+        type: string
+        required: false
+
+      build-trigger:
+        description: "OID 1.3.6.1.4.1.57264.1.20"
+        type: string
+        required: false
+
+      run-invocation-uri:
+        description: "OID 1.3.6.1.4.1.57264.1.21"
+        type: string
+        required: false
+
+      source-repository-visibility-at-signing:
+        description: "OID 1.3.6.1.4.1.57264.1.22"
+        type: string
+        required: false
+
+      deployment-environment:
+        description: "OID 1.3.6.1.4.1.57264.1.23"
+        type: string
+        required: false
+
+      # --------------------------------------------------
+      # Arbitrary Custom OID Constraints
+      # --------------------------------------------------
+
+      custom-claims:
+        description: |
+          Additional custom OID claims.
+          Format: one per line, oid=value
+          Example:
+            1.2.3.4.5=test
+            1.3.6.1.4.1.57264.1.99=experimental
+        type: string
+        required: false
 
 permissions:
   contents: write
@@ -75,44 +183,81 @@ jobs:
       - name: Generate sigstore enrollment
         id: enrollment
         env:
-          ISSUER: ${{ inputs.issuer }}
-          IDENTITY: ${{ inputs.identity }}
           MAX_AGE: ${{ inputs.max_age }}
-          WEBCAT_PATH: ${{ inputs.webcat_path }}
-          ENROLLMENT_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_file }}
-          ENROLLMENT_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_prev_file }}
-          BUNDLE_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_file }}
-          BUNDLE_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_prev_file }}
+          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
+          ENROLLMENT_PREV_PATH: ${{ inputs.enrollment_prev_path }}
+          BUNDLE_PATH: ${{ inputs.bundle_path }}
+          BUNDLE_PREV_PATH: ${{ inputs.bundle_prev_path }}
         run: |
           set -euo pipefail
 
           tmp_file="$(mktemp)"
 
-          mkdir -p "$WEBCAT_PATH"
+          args=()
 
-          npx tsx webcat-cli/src/cli.ts enrollment create \
+          add_flag () {
+            local flag="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              args+=("$flag" "$value")
+            fi
+          }
+
+          # Issuer
+          add_flag "--issuer-v2" "${{ inputs.issuer-v2 }}"
+          add_flag "--issuer-v1" "${{ inputs.issuer-v1 }}"
+
+          # Signer claims
+          add_flag "--build-signer-uri" "${{ inputs.build-signer-uri }}"
+          add_flag "--build-signer-digest" "${{ inputs.build-signer-digest }}"
+          add_flag "--runner-environment" "${{ inputs.runner-environment }}"
+          add_flag "--run-invocation-uri" "${{ inputs.run-invocation-uri }}"
+
+          # Repository claims
+          add_flag "--source-repository-uri" "${{ inputs.source-repository-uri }}"
+          add_flag "--source-repository-digest" "${{ inputs.source-repository-digest }}"
+          add_flag "--source-repository-ref" "${{ inputs.source-repository-ref }}"
+          add_flag "--source-repository-identifier" "${{ inputs.source-repository-identifier }}"
+          add_flag "--source-repository-owner-uri" "${{ inputs.source-repository-owner-uri }}"
+          add_flag "--source-repository-owner-identifier" "${{ inputs.source-repository-owner-identifier }}"
+          add_flag "--source-repository-visibility-at-signing" "${{ inputs.source-repository-visibility-at-signing }}"
+
+          # Build config claims
+          add_flag "--build-config-uri" "${{ inputs.build-config-uri }}"
+          add_flag "--build-config-digest" "${{ inputs.build-config-digest }}"
+          add_flag "--build-trigger" "${{ inputs.build-trigger }}"
+
+          # Deployment claim
+          add_flag "--deployment-environment" "${{ inputs.deployment-environment }}"
+
+          # Custom arbitrary OID claims
+          if [ -n "${{ inputs.custom-claims }}" ]; then
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              args+=("--claim" "$line")
+            done <<< "${{ inputs.custom-claims }}"
+          fi
+
+          node webcat-cli/dist/cli.cjs enrollment create \
             --type sigstore \
             --community-trusted-root \
-            --issuer "$ISSUER" \
-            --identity "$IDENTITY" \
             --max-age "$MAX_AGE" \
+            "${args[@]}" \
             --output "$tmp_file"
 
-          # Fresh start: no existing enrollment
+          # Diff logic
           if [ ! -f "$ENROLLMENT_PATH" ]; then
             mv "$tmp_file" "$ENROLLMENT_PATH"
             echo "changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Existing enrollment: check for changes
           if cmp -s "$tmp_file" "$ENROLLMENT_PATH"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             rm -f "$tmp_file"
             exit 0
           fi
 
-          # Save previous version
           cp "$ENROLLMENT_PATH" "$ENROLLMENT_PREV_PATH"
           [ -f "$BUNDLE_PATH" ] && cp "$BUNDLE_PATH" "$BUNDLE_PREV_PATH"
 
@@ -123,10 +268,10 @@ jobs:
       - name: Prepare pull request details
         if: steps.enrollment.outputs.changed == 'true'
         env:
-          ISSUER: ${{ inputs.issuer }}
-          IDENTITY: ${{ inputs.identity }}
+          ISSUER_V2: ${{ inputs.issuer-v2 }}
+          ISSUER_V1: ${{ inputs.issuer-v1 }}
           MAX_AGE: ${{ inputs.max_age }}
-          ENROLLMENT_PATH: ${{ inputs.webcat_path }}/${{ inputs.enrollment_file }}
+          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
         run: |
           set -euo pipefail
 
@@ -135,16 +280,45 @@ jobs:
           {
             echo "## Sigstore enrollment update"
             echo
-            echo "- Issuer: $ISSUER"
-            echo "- Identity: $IDENTITY"
+
+            echo "### Issuer"
+            [ -n "$ISSUER_V2" ] && echo "- Fulcio Issuer V2: $ISSUER_V2"
+            [ -n "$ISSUER_V1" ] && echo "- Fulcio Issuer V1: $ISSUER_V1"
+            echo
+
+            echo "### Signer Constraints"
+            [ -n "${{ inputs.build-signer-uri }}" ] && \
+              echo "- Build Signer URI: ${{ inputs.build-signer-uri }}"
+            [ -n "${{ inputs.build-signer-digest }}" ] && \
+              echo "- Build Signer Digest: ${{ inputs.build-signer-digest }}"
+            [ -n "${{ inputs.runner-environment }}" ] && \
+              echo "- Runner Environment: ${{ inputs.runner-environment }}"
+            [ -n "${{ inputs.run-invocation-uri }}" ] && \
+              echo "- Run Invocation URI: ${{ inputs.run-invocation-uri }}"
+            echo
+
+            echo "### Repository Constraints"
+            [ -n "${{ inputs.source-repository-uri }}" ] && \
+              echo "- Repository URI: ${{ inputs.source-repository-uri }}"
+            [ -n "${{ inputs.source-repository-ref }}" ] && \
+              echo "- Ref: ${{ inputs.source-repository-ref }}"
+            [ -n "${{ inputs.source-repository-digest }}" ] && \
+              echo "- Repository Digest: ${{ inputs.source-repository-digest }}"
+            echo
+
+            echo "### Other Constraints"
+            [ -n "${{ inputs.deployment-environment }}" ] && \
+              echo "- Deployment Environment: ${{ inputs.deployment-environment }}"
             echo "- Max age: $MAX_AGE"
             echo
+
             echo "### Diff"
             echo
-            echo "```diff"
+            echo '```diff'
             git diff -- "$ENROLLMENT_PATH"
-            echo "```"
+            echo '```'
           } > "$PR_BODY"
+
 
       # 7. Open or update a single rolling PR
       - name: Open pull request
@@ -157,4 +331,7 @@ jobs:
           branch: "chore/update-sigstore-enrollment"
           delete-branch: false
           add-paths: |
-            ${{ inputs.webcat_path }}
+            ${{ inputs.enrollment_path }}
+            ${{ inputs.enrollment_prev_path }}
+            ${{ inputs.bundle_path }}
+            ${{ inputs.bundle_prev_path }}

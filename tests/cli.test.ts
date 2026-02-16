@@ -167,16 +167,20 @@ describe("enrollment helpers", () => {
     const enrollment = buildEnrollmentObject({
       type: "sigstore",
       trustedRoot,
-      issuer: "issuer.example",
-      identity: "identity@example.com",
+      claims: {
+        "2.5.29.17": "identity@example.com",
+        "1.3.6.1.4.1.57264.1.8": "issuer.example",
+      },
       maxAge: 1_000_000,
     });
 
     expect(enrollment).toEqual({
       type: "sigstore",
       trusted_root: trustedRoot,
-      identity: "identity@example.com",
-      issuer: "issuer.example",
+      claims: {
+        "2.5.29.17": "identity@example.com",
+        "1.3.6.1.4.1.57264.1.8": "issuer.example",
+      },
       max_age: 1_000_000,
     });
   });
@@ -236,11 +240,19 @@ describe("enrollment helpers", () => {
       parseEnrollmentObject({
         type: "sigstore",
         trusted_root: "",
-        identity: "id",
-        issuer: "issuer",
+        claims: { "2.5.29.17": "id" },
         max_age: 1_000_000,
       }),
     ).toThrow("enrollment.trusted_root must be an object");
+
+    expect(() =>
+      parseEnrollmentObject({
+        type: "sigstore",
+        trusted_root: {},
+        claims: { not_oid: "id" },
+        max_age: 1_000_000,
+      }),
+    ).toThrow("enrollment.claims keys must be valid OID strings");
   });
 });
 
