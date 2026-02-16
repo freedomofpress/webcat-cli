@@ -179,6 +179,11 @@ jobs:
         working-directory: webcat-cli
         run: npm ci
 
+      # 4.5. Build webcat-cli
+      - name: Install webcat-cli dependencies
+        working-directory: webcat-cli
+        run: npm run build
+
       # 5. Generate enrollment
       - name: Generate sigstore enrollment
         id: enrollment
