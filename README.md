@@ -139,20 +139,20 @@ and/or compatibility flags `--issuer` + `--identity`) and either `--trusted-root
 Example – hash the sample enrollment definition:
 
 ```sh
-npx tsx src/cli.ts enrollment hash -i examples/enrollment.json
+npx webcat enrollment hash -i examples/enrollment.json
 # => TSNydkDZBv6QNZ3m7ZuBP9fFj0TD6hHDmzcwu9ulK3A
 ```
 
 The canonicalized document (useful for audits) can be produced with:
 
 ```sh
-npx tsx src/cli.ts enrollment canonicalize -i examples/enrollment.json
+npx webcat enrollment canonicalize -i examples/enrollment.json
 ```
 
 Sigstore enrollment example with claims (legacy `--identity` and `--issuer` are mapped to claims):
 
 ```sh
-npx tsx src/cli.ts enrollment create \
+npx webcat enrollment create \
   --type sigstore \
   --community-trusted-root \
   --identity alice@example.com \
@@ -180,14 +180,14 @@ The `manifest` namespace operates on WEBCAT manifests:
 Example – hash the provided manifest:
 
 ```sh
-npx tsx src/cli.ts manifest hash -i examples/manifest.json
+npx webcat manifest hash -i examples/manifest.json
 # => 8OYr4SFw2U2NR2efE69FAKZicf_2QbUGxXT7kxN1C80
 ```
 
 Example – verify a bundle:
 
 ```sh
-npx tsx src/cli.ts manifest verify examples/bundle.json
+npx webcat manifest verify examples/bundle.json
 ```
 
 ### Sigstore signing
@@ -198,7 +198,7 @@ endpoints with `--fulcio-url`, `--rekor-url`, and `--tsa-url` when signing.
 To sign with Sigstore using an ambient OIDC token (for example, in CI):
 
 ```sh
-npx tsx src/cli.ts manifest sign \
+npx webcat manifest sign \
   --type sigstore \
   --input manifest.json
 ```
@@ -206,7 +206,7 @@ npx tsx src/cli.ts manifest sign \
 If you already have an OIDC ID token, you can pass it explicitly:
 
 ```sh
-npx tsx src/cli.ts manifest sign \
+npx webcat manifest sign \
   --type sigstore \
   --input manifest.json \
   --oidc-token "$OIDC_ID_TOKEN"
@@ -215,7 +215,7 @@ npx tsx src/cli.ts manifest sign \
 To perform an interactive device authorization flow (opens a browser and prompts for a code):
 
 ```sh
-npx tsx src/cli.ts manifest sign \
+npx webcat manifest sign \
   --type sigstore \
   --input manifest.json \
   --interactive
@@ -224,7 +224,7 @@ npx tsx src/cli.ts manifest sign \
 To use custom Sigstore infrastructure:
 
 ```sh
-npx tsx src/cli.ts manifest sign \
+npx webcat manifest sign \
   --type sigstore \
   --input manifest.json \
   --fulcio-url https://fulcio.example.com \
@@ -284,7 +284,7 @@ TMPDIR=$(mktemp -d)
 echo index > "$TMPDIR/index.html"
 echo error > "$TMPDIR/error.html"
 
-npm run start -- enrollment create \
+npx webcat enrollment create \
   --policy-file trust_policy \
   --threshold 1 \
   --max-age 15552000 \
@@ -293,21 +293,24 @@ npm run start -- enrollment create \
   --signer "$HEX2" \
   --output enrollment.json
 
-npm run start -- manifest generate \
+npx webcat manifest generate \
   --policy-file trust_policy \
   --config webcat.config.json \
   --directory "$TMPDIR" \
   --output manifest_unsigned.json
 
-npm run start -- manifest sign \
+npx webcat manifest sign \
   --policy-file trust_policy \
   -i manifest_unsigned.json \
   -k keys/key1 \
   -o manifest.json
 
 # 4) Bundle and verify
-npm run start -- bundle create --enrollment enrollment.json --manifest manifest.json --output bundle.json
-npm run start -- manifest verify bundle.json
+npx webcat bundle create \
+  --enrollment enrollment.json \
+  --manifest manifest.json \
+  --output bundle.json
+npx webcat manifest verify bundle.json
 ```
 
 The script prints intermediate JSON artifacts with `jq` so you can inspect the
