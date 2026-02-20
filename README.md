@@ -87,7 +87,9 @@ See the `webcat-demo-test` repository for a complete, end-to-end example of this
 
 ### If you are using Sigsum
 
-Take a look at `demo.sh`.
+Take a look at [`demo.sh`](./demo.sh) or the [end-to-end example] below.
+
+[end-to-end example]: #end-to-end-example-based-on-demosh
 
 ### If you are using Sigstore
 
@@ -96,7 +98,7 @@ Refer to the GitHub Actions described above.
 ## Requirements
 
 - Node.js 20 or newer.
-- `sigsum-submit` must be available on your `$PATH` for `manifest sign` operations.
+- `sigsum-submit` must be available on your `$PATH` for `manifest sign` operations. (See the [installation instructions][#installation] below.)
 - A Sigsum trust policy and keypair for signing manifests.
 - An OIDC identity token in the environment (CI-supported) or interactive login for `manifest sign --type sigstore`.
 
@@ -112,12 +114,14 @@ To run the installed CLI:
 npx webcat --help
 ```
 
-Sigsum needs to be installed separately, as it currently is only available as a Go binary:
+Sigsum needs to be installed separately, as it currently is only available in Go binaries:
 
 ```
 go install sigsum.org/sigsum-go/cmd/sigsum-key@latest
 go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 ```
+
+By default, these binaries will be available in `$HOME/go/bin`.
 
 ## Enrollment helpers
 
@@ -236,14 +240,14 @@ npx tsx src/cli.ts manifest sign \
 Use `bundle create` to combine an enrollment and a manifest (with signatures) into a WEBCAT bundle that can be distributed to verifiers:
 
 ```sh
-npx tsx src/cli.ts bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
+npx webcat bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
 ```
 
 The resulting `bundle.json` matches the fixture located in `examples/bundle.json`.
 
 ## End-to-end example (based on `demo.sh`)
 
-The repository includes `demo.sh`, which exercises the full workflow. The commands
+The repository includes [`demo.sh`](./demo.sh), which exercises the full workflow. The commands
 below mirror that script so you can quickly test the CLI end to end:
 
 ```sh
