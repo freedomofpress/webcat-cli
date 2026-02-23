@@ -324,8 +324,33 @@ jobs:
             echo '```'
           } > "$PR_BODY"
 
+      - name: Compute add-paths
+        id: compute_paths
+        if: steps.enrollment.outputs.changed == 'true'
+        env:
+          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
+          ENROLLMENT_PREV_PATH: ${{ inputs.enrollment_prev_path }}
+          BUNDLE_PATH: ${{ inputs.bundle_path }}
+          BUNDLE_PREV_PATH: ${{ inputs.bundle_prev_path }}
+        run: |
+          set -euo pipefail
 
-      # 7. Open or update a single rolling PR
+          OUT="${RUNNER_TEMP}/paths.txt"
+          : > "$OUT"
+
+          add_if_exists () {
+            [ -f "$1" ] && echo "$1" >> "$OUT"
+          }
+
+          add_if_exists "$ENROLLMENT_PATH"
+          add_if_exists "$ENROLLMENT_PREV_PATH"
+          add_if_exists "$BUNDLE_PATH"
+          add_if_exists "$BUNDLE_PREV_PATH"
+
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          cat "$OUT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       - name: Open pull request
         if: steps.enrollment.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
@@ -335,8 +360,4 @@ jobs:
           body-path: ${{ runner.temp }}/pr-body.md
           branch: "chore/update-sigstore-enrollment"
           delete-branch: false
-          add-paths: |
-            ${{ inputs.enrollment_path }}
-            ${{ inputs.enrollment_prev_path }}
-            ${{ inputs.bundle_path }}
-            ${{ inputs.bundle_prev_path }}
+          add-paths: ${{ steps.compute_paths.outputs.paths }}
