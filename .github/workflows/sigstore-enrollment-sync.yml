@@ -339,7 +339,9 @@ jobs:
           : > "$OUT"
 
           add_if_exists () {
-            [ -f "$1" ] && echo "$1" >> "$OUT"
+            if [ -n "$1" ] && [ -f "$1" ]; then
+              echo "$1" >> "$OUT"
+            fi
           }
 
           add_if_exists "$ENROLLMENT_PATH"
