@@ -1,6 +1,6 @@
 {
   "name": "@freedomofpress/webcat-cli",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "WEBCAT CLI for creating, validating, and packaging enrollments and manifests.",
   "license": "MIT",
   "repository": {
