@@ -54,9 +54,22 @@ export async function deriveSignerKeyFromPrivateKey(privKeyPath: string): Promis
   return hexToBase64Url(hex);
 }
 
-export async function runSigsumSubmit(policyPath: string, keyPath: string, payloadPath: string): Promise<void> {
+export async function runSigsumSubmit(
+  policyPath: string,
+  keyPath: string,
+  payloadPath: string,
+  tokenSigningKey?: string,
+  tokenDomain?: string,
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("sigsum-submit", ["-p", policyPath, "-k", keyPath, payloadPath], {
+    const child = spawn("sigsum-submit", [
+      "-p", policyPath, "-k", keyPath,
+      ...(tokenDomain && tokenSigningKey ? [
+        "-a", tokenSigningKey,
+        "-d", tokenDomain,
+      ] : []),
+      payloadPath,
+    ], {
       stdio: "inherit",
     });
     child.on("error", (err: NodeJS.ErrnoException) => {

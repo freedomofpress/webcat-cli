@@ -634,6 +634,8 @@ manifest
   .requiredOption("-i, --input <path>", "Manifest file to sign")
   .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
   .option("-k, --key <path>", "Sigsum private key for signing")
+  .option("--token-signing-key <path>", "Sigsum private key for token signing")
+  .option("--token-domain <domain>", "Domain name to use for Sigsum rate limiting")
   .option(
     "--bundle-type <type>",
     "Sigstore bundle type to generate (message or dsse)",
@@ -656,6 +658,8 @@ manifest
       input: string;
       policyFile?: string;
       key?: string;
+      tokenSigningKey?: string;
+      tokenDomain?: string;
       bundleType?: string;
       fulcioUrl?: string;
       rekorUrl?: string;
@@ -698,7 +702,13 @@ manifest
         const tempFile = path.join(tempDir, "manifest.json");
         try {
           await writeFile(tempFile, canonicalManifest);
-          await runSigsumSubmit(options.policyFile, options.key, tempFile);
+          await runSigsumSubmit(
+            options.policyFile,
+            options.key,
+            tempFile,
+            options.tokenSigningKey,
+            options.tokenDomain,
+          );
           const proofPath = `${tempFile}.proof`;
           let proofText: string;
           try {
