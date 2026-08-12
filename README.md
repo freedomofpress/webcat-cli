@@ -158,6 +158,14 @@ go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 
 By default, these binaries will be available in `$HOME/go/bin`.
 
+For development, the flake bundles the CLI with the sigsum-go tools it shells out to:
+
+```sh
+nix profile install github:freedomofpress/webcat-cli#toolchain   # webcat, sigsum-key, sigsum-submit
+nix run github:freedomofpress/webcat-cli -- --help               # or run once, without installing
+nix develop                                                      # dev shell for working on the CLI
+```
+
 ## Getting started
 
 `init` offers two built-in Sigsum policies: `test` (the Sigsum test logs, no rate limiting)
