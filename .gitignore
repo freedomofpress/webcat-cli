@@ -140,3 +140,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
 *.policy
+
+# nix and friends
+.direnv/
+/result

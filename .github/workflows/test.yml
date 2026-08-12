@@ -15,6 +15,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
+          # Node major tracks nodejs_22 in flake.nix; bump both together.
           node-version: '22'
 
       - run: npm ci
@@ -28,6 +29,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
+          # Node major tracks nodejs_22 in flake.nix; bump both together.
           node-version: '22'
 
       - run: npm ci
