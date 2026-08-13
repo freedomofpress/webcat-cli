@@ -9,6 +9,7 @@ import {
   ensureRecordOfStrings,
   toBase64Url,
 } from "./utils.js";
+import { validateCSP } from "webcat/webcat/validators";
 
 const WASM_EXTENSION = ".wasm";
 
@@ -65,6 +66,11 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
 
   const version = ensureNonEmptyString(parsed.version, "config.version");
   const defaultCsp = ensureNonEmptyString(parsed.default_csp, "config.default_csp");
+  try {
+    await validateCSP(parsed.default_csp, new Set());
+  } catch(err: any) {
+    throw new Error(`config.default_csp: ${err.message}`)
+  }
   // Remove leading / to default_index. It is automatically appended to dirs whcih
   // have a ending /
   let defaultIndex = ensureNonEmptyString(parsed.default_index, "config.default_index");
@@ -90,6 +96,11 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   for (const key of Object.keys(extraCspRecord)) {
     if (!key.startsWith("/")) {
       throw new Error(`config.extra_csp keys must start with '/': ${key}`);
+    }
+    try {
+      await validateCSP(extraCspRecord[key], new Set());
+    } catch (err: any) {
+      throw new Error(`config.extra_csp["${key}"]: ${err.message}`);
     }
   }
 
