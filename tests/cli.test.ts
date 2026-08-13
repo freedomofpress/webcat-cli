@@ -322,13 +322,13 @@ describe("manifest configuration", () => {
         default_index: "/index.html",
         default_fallback: "/error.html",
         wasm: ["module.wasm"],
-        extra_csp: { "/path": "policy" },
+        extra_csp: { "/path": "default-src 'none'" },
       }),
     );
 
     const config = await loadManifestConfig(configPath);
     expect(config.default_index).toBe("index.html");
-    expect(config.extra_csp["/path"]).toBe("policy");
+    expect(config.extra_csp["/path"]).toBe("default-src 'none'");
 
     await writeFile(configPath, "not json");
     await expect(loadManifestConfig(configPath)).rejects.toThrow(
@@ -340,7 +340,7 @@ describe("manifest configuration", () => {
       JSON.stringify({
         app: "https://example.com",
         version: "1.0.0",
-        default_csp: "csp",
+        default_csp: "default-src 'none'",
         default_index: "index.html",
         default_fallback: "relative.html",
       }),
@@ -348,6 +348,37 @@ describe("manifest configuration", () => {
 
     await expect(loadManifestConfig(configPath)).rejects.toThrow(
       "config.default_fallback must start with '/'",
+    );
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        app: "https://example.com",
+        version: "1.0.0",
+        default_csp: "csp",
+        default_index: "index.html",
+        default_fallback: "/error.html",
+      }),
+    );
+
+    await expect(loadManifestConfig(configPath)).rejects.toThrow(
+      "config.default_csp: default-src is not none, and object-src is not defined.",
+    );
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        app: "https://example.com",
+        version: "1.0.0",
+        default_csp: "default-src 'none'",
+        default_index: "index.html",
+        default_fallback: "/error.html",
+        extra_csp: { "/path": "csp" },
+      }),
+    );
+
+    await expect(loadManifestConfig(configPath)).rejects.toThrow(
+      'config.extra_csp["/path"]: default-src is not none, and object-src is not defined.',
     );
 
     await rm(dir, { recursive: true, force: true });
