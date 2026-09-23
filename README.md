@@ -1,6 +1,7 @@
 # WEBCAT CLI
 
 Utilities for creating, validating, and packaging WEBCAT enrollments and manifests.
+
 ## Quick Start
 
 This utility, together with the GitHub Actions provided in the same repository, can be used to quickly integrate and enroll a web application or domain into WEBCAT. Below are the recommended steps.
@@ -126,6 +127,23 @@ go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 ```
 
 By default, these binaries will be available in `$HOME/go/bin`.
+
+### With Nix
+
+The [nix](https://nixos.org/explore/) flake bundles `webcat` with the Sigsum tools:
+
+```sh
+nix profile install github:freedomofpress/webcat-cli#toolchain
+```
+
+Or run it once, without installing:
+
+```sh
+nix run github:freedomofpress/webcat-cli -- --help
+```
+
+For development, `nix develop` (or `direnv allow`) provides Node, Sigsum,
+and [`just`](https://just.systems); run `just` to list targets, e.g. `just test`.
 
 ## Enrollment helpers
 

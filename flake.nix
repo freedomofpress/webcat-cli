@@ -92,12 +92,11 @@
             pkgs.jq
             pkgs.curl
             pkgs.git
+            pkgs.just
           ];
 
           shellHook = ''
-            echo "webcat-cli dev shell r- node $(node --version), $(sigsum-key --version 2>&1 | head -1)"
-            echo "  npm ci && npm run build     build dist/cli.cjs"
-            echo "  npm run start -- --help     run the CLI from source"
+            echo "webcat-cli dev shell: node $(node --version); run \`just\` for targets"
           '';
         };
       });
