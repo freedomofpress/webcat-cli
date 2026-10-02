@@ -13,6 +13,19 @@ import {
   scanDirectory,
 } from "./manifest.js";
 import { loadBundleDocument } from "./bundle.js";
+import {
+  DEFAULT_CHAIN_API,
+  DEFAULT_LIST_URL,
+  WELL_KNOWN_PATH,
+  type Oracle,
+  bareDomain,
+  enrollmentHashHex,
+  fetchDomainStatus,
+  fetchListEntry,
+  fetchOracles,
+  fetchServedEnrollment,
+  submitObservation,
+} from "./chain.js";
 import { fetchTimestampFromPolicy, signManifestWithSigsum, sigsumEnrollmentFromPolicy, verifySigsumManifest } from "./sigsum.js";
 import {
   DEFAULT_FULCIO_URL,
@@ -30,7 +43,7 @@ import {
   staticIdentityProvider,
   verifySigstoreManifest,
 } from "./sigstore.js";
-import { CliError, OID_RE, ensureObject, hashPolicyBytes, invalid, log, readJson, readText, sha256, toBase64Url, writeOutput } from "./utils.js";
+import { CliError, OID_RE, ensureObject, external, hashPolicyBytes, invalid, log, readJson, readText, sha256, toBase64Url, writeOutput } from "./utils.js";
 import pkg from "../package.json" with { type: "json" };
 
 const collect = (value: string, previous: string[] = []): string[] => previous.concat(value);
@@ -162,6 +175,88 @@ enrollment
   .action(async (options) => {
     const canonical = canonicalize(await loadEnrollment(options.input));
     process.stdout.write(toBase64Url(sha256(canonical)) + "\n");
+  });
+
+enrollment
+  .command("submit")
+  .description("Ask the WEBCAT oracles to observe the enrollment served at https://<domain>/.well-known/webcat/enrollment.json")
+  .argument("<domain>", "Domain to enroll (must already serve the enrollment file)")
+  .option("--chain-api <url>", "Chain query API used to discover oracles", DEFAULT_CHAIN_API)
+  .option("--oracle <url>", "Oracle endpoint to submit to instead of the chain's list (repeatable)", collect)
+  .option("-e, --enrollment <path>", "Local enrollment file that must match what the domain serves")
+  .option("--unenroll", "Allow submitting when the domain serves no enrollment (oracles will vote to unenroll)")
+  .option("--dry-run", "Check the served enrollment and solve the proof of work, but do not submit")
+  .action(async (domain: string, options) => {
+    const served = await fetchServedEnrollment(domain);
+    if (!served) {
+      if (!options.unenroll) {
+        throw invalid(`https://${bareDomain(domain)}${WELL_KNOWN_PATH} is not found; --unenroll is required to request removal`);
+      }
+      log(`Warning: ${bareDomain(domain)} serves no enrollment; oracles will vote to unenroll it.`);
+    } else {
+      log(`Served enrollment hash: ${served.hash}`);
+      if (options.enrollment) {
+        const local = enrollmentHashHex(await loadEnrollment(options.enrollment));
+        if (local !== served.hash) {
+          throw invalid(`--enrollment must match the served enrollment: local hash ${local}, served ${served.hash}`);
+        }
+      }
+    }
+    const oracles: Oracle[] = options.oracle ? options.oracle.map((endpoint: string) => ({ endpoint })) : await fetchOracles(options.chainApi);
+    if (oracles.length === 0) {
+      throw external(`failed to find oracles: ${options.oracle ? "--oracle list is empty" : `${options.chainApi} lists none`}`);
+    }
+    const results = await Promise.all(oracles.map((oracle) => submitObservation(oracle, domain, { dryRun: options.dryRun })));
+    for (const { endpoint, ok, message } of results) {
+      process.stdout.write(`${endpoint}: ${ok ? "OK" : "FAIL"} (${message})\n`);
+    }
+    const succeeded = results.filter((r) => r.ok).length;
+    process.stdout.write(`${succeeded}/${results.length} oracles ${options.dryRun ? "reachable (dry run, nothing submitted)" : "accepted the observation"}\n`);
+    if (succeeded === 0) {
+      process.exitCode = 1;
+    }
+  });
+
+enrollment
+  .command("status")
+  .description("Show a domain's enrollment as served, as recorded on the chain, and as published in the list")
+  .argument("<domain>", "Domain to inspect")
+  .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
+  .option("--list <url>", "Published enrollment list to check", DEFAULT_LIST_URL)
+  .option("--no-list", "Skip the published list check")
+  .action(async (domain: string, options) => {
+    const [served, status, list] = await Promise.all([
+      fetchServedEnrollment(domain).catch((err) => err as Error),
+      fetchDomainStatus(options.chainApi, domain),
+      options.list ? fetchListEntry(options.list, domain).catch((err) => err as Error) : null,
+    ]);
+    const show = (value: string | null | undefined) => value ?? "none";
+    process.stdout.write(`Domain: ${bareDomain(domain)}\n`);
+    process.stdout.write(`Served enrollment: ${served instanceof Error ? `ERROR (${served.message})` : show(served?.hash)}\n`);
+    process.stdout.write(`Chain canonical:   ${show(status.canonical)}\n`);
+    for (const p of status.pending) {
+      process.stdout.write(`Chain pending:     ${show(p.hash)} (since ${p.time})\n`);
+    }
+    for (const v of status.votes) {
+      process.stdout.write(`Oracle vote:       ${show(v.hash)} (${v.oracle?.slice(0, 16)}... at ${v.time})\n`);
+    }
+    if (list) {
+      process.stdout.write(
+        list instanceof Error ? `Published list:    ERROR (${list.message})\n` : `Published list:    ${show(list.hash)} (block ${list.blockHeight})\n`,
+      );
+    }
+    const servedHash = served instanceof Error ? undefined : (served?.hash ?? null);
+    if (servedHash !== undefined) {
+      process.stdout.write(
+        servedHash === null && status.canonical === null
+          ? "Status: not enrolled\n"
+          : servedHash === status.canonical
+            ? "Status: served enrollment matches the chain\n"
+          : status.pending.some((p) => p.hash === servedHash)
+            ? "Status: served enrollment is pending promotion on the chain\n"
+            : "Status: served enrollment is NOT what the chain records; run `enrollment submit` to request an observation\n",
+      );
+    }
   });
 
 // ---------------------------------------------------------------------------
