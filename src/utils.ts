@@ -17,7 +17,8 @@ export class CliError extends Error {
 }
 export const invalid = (message: string): CliError => new CliError(message, 2);
 export const external = (message: string): CliError => new CliError(message, 3);
-export const causeOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+export const causeOf = (err: unknown): string =>
+  err instanceof Error ? (err.cause instanceof Error ? `${err.message}: ${err.cause.message}` : err.message) : String(err);
 
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const YEAR_SECONDS = 365 * 24 * 60 * 60;
