@@ -58,7 +58,7 @@ on:
         description: "Node.js version for webcat-cli"
         type: string
         required: false
-        default: "20"
+        default: "22"
 
       issuer-v1:
         description: "Fulcio Issuer V1 (OID 1.3.6.1.4.1.57264.1.1)"

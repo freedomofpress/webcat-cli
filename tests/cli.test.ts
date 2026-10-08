@@ -4,27 +4,34 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
+import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
+import { loadBundleDocument } from "../src/bundle";
+import { writeCasObject } from "../src/cas";
 import {
-  buildEnrollmentObject,
+  loadManifestConfig,
+  loadManifestDocument,
+  parseManifestDocumentObject,
+  scanDirectory,
+} from "../src/manifest";
+import {
   decodeKeyMaterial,
   ensureAbsolutePath,
   ensureNonEmptyString,
   ensureRecordOfStrings,
   hexToBase64Url,
-  loadBundleDocument,
-  loadEnrollment,
-  loadManifestConfig,
-  loadManifestDocument,
-  parseEnrollmentObject,
   parseInteger,
-  parseManifestDocumentObject,
-  parseSignerKey,
-  scanDirectory,
   toBase64Url,
   validateCasUrl,
   validateMaxAge,
-} from "../src/test-exports";
-import { writeCasObject } from "../src/cas";
+} from "../src/utils";
+
+describe("canonical JSON", () => {
+  it("sorts keys, escapes only quotes and backslashes, rejects floats", async () => {
+    const { canonicalize } = await import("../src/canonicalize");
+    expect(canonicalize({ b: [1, true, null, "q\"\\\n"], a: { z: "", y: 0 } })).toBe('{"a":{"y":0,"z":""},"b":[1,true,null,"q\\"\\\\\n"]}');
+    expect(() => canonicalize({ x: 1.5 })).toThrow(TypeError);
+  });
+});
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -43,10 +50,10 @@ describe("key parsing", () => {
       "key must contain an even number of hex characters",
     );
     expect(() => decodeKeyMaterial("not_base64", "key")).toThrow(
-      /key must be 32 bytes/,
+      /key must be a 32-byte/,
     );
     expect(() => decodeKeyMaterial("00".repeat(8), "key")).toThrow(
-      "key must be 32 bytes",
+      "key must be a 32-byte",
     );
   });
 
@@ -59,26 +66,26 @@ describe("key parsing", () => {
 
 describe("integer and range validation", () => {
   it("enforces positive integers", () => {
-    expect(() => parseInteger(-1, "value")).toThrow("value must be a positive integer");
-    expect(() => parseInteger("oops", "value")).toThrow("value must be a positive integer");
+    expect(() => parseInteger(-1, "value")).toThrow("value must be a non-negative integer");
+    expect(() => parseInteger("oops", "value")).toThrow("value must be a non-negative integer");
     expect(parseInteger(5, "value")).toBe(5);
   });
 
   it("enforces max-age bounds", () => {
-    expect(() => validateMaxAge(60 * 60 * 24 * 7)).toThrow(
-      "max-age must be larger than one week",
+    expect(() => validateMaxAge(60 * 60 * 24 * 7, "max_age")).toThrow(
+      "max_age must be between one week and one year",
     );
-    expect(() => validateMaxAge(60 * 60 * 24 * 365)).toThrow(
-      "max-age must be smaller than one year",
+    expect(() => validateMaxAge(60 * 60 * 24 * 365, "max_age")).toThrow(
+      "max_age must be between one week and one year",
     );
-    expect(() => validateMaxAge(60 * 60 * 24 * 30)).not.toThrow();
+    expect(() => validateMaxAge(60 * 60 * 24 * 30, "max_age")).not.toThrow();
   });
 
   it("validates CAS URLs", () => {
-    expect(() => validateCasUrl("notaurl")).toThrow("invalid CAS URL");
-    expect(() => validateCasUrl("http://example.com")).toThrow("CAS URL must use https://");
-    expect(() => validateCasUrl("https://")).toThrow("invalid CAS URL");
-    expect(() => validateCasUrl("https://example.com")).not.toThrow();
+    expect(() => validateCasUrl("notaurl", "cas_url")).toThrow("cas_url must be a valid URL");
+    expect(() => validateCasUrl("http://example.com", "cas_url")).toThrow("cas_url must use https://");
+    expect(() => validateCasUrl("https://", "cas_url")).toThrow("cas_url must be a valid URL");
+    expect(() => validateCasUrl("https://example.com", "cas_url")).not.toThrow();
   });
 });
 
@@ -115,7 +122,7 @@ describe("enrollment helpers", () => {
         maxAge: 1_000_000,
         casUrl: "https://example.com",
       }),
-    ).toThrow("at least one signer must be provided");
+    ).toThrow("enrollment.signers must contain at least one signer");
 
     expect(() =>
       buildEnrollmentObject({
@@ -126,7 +133,7 @@ describe("enrollment helpers", () => {
         maxAge: 1_000_000,
         casUrl: "https://example.com",
       }),
-    ).toThrow("duplicate signer keys detected");
+    ).toThrow("enrollment.signers must not contain duplicates");
 
     expect(() =>
       buildEnrollmentObject({
@@ -137,7 +144,7 @@ describe("enrollment helpers", () => {
         maxAge: 1_000_000,
         casUrl: "https://example.com",
       }),
-    ).toThrow("threshold cannot exceed number of signers");
+    ).toThrow("enrollment.threshold must be between 1 and the number of signers");
 
     expect(() =>
       buildEnrollmentObject({
@@ -148,7 +155,7 @@ describe("enrollment helpers", () => {
         maxAge: 1_000_000,
         casUrl: "https://example.com",
       }),
-    ).toThrow("threshold must be at least 1");
+    ).toThrow("enrollment.threshold must be between 1 and the number of signers");
 
     expect(() =>
       buildEnrollmentObject({
@@ -159,7 +166,7 @@ describe("enrollment helpers", () => {
         maxAge: 60 * 60 * 24 * 8,
         casUrl: "http://example.com",
       }),
-    ).toThrow("CAS URL must use https://");
+    ).toThrow("enrollment.cas_url must use https://");
   });
 
   it("builds sigstore enrollment objects", () => {
@@ -208,7 +215,7 @@ describe("enrollment helpers", () => {
     expect(loaded.type).toBe("sigsum");
 
     await writeFile(file, "not json");
-    await expect(loadEnrollment(file)).rejects.toThrow("failed to parse enrollment JSON");
+    await expect(loadEnrollment(file)).rejects.toThrow("is not valid JSON");
 
     await rm(dir, { recursive: true, force: true });
   });
@@ -234,7 +241,7 @@ describe("enrollment helpers", () => {
         max_age: 1,
         cas_url: "https://example.com",
       }),
-    ).toThrow("duplicate signer keys detected in enrollment");
+    ).toThrow("enrollment.signers must not contain duplicates");
 
     expect(() =>
       parseEnrollmentObject({
@@ -252,7 +259,7 @@ describe("enrollment helpers", () => {
         claims: { not_oid: "id" },
         max_age: 1_000_000,
       }),
-    ).toThrow("enrollment.claims keys must be valid OID strings");
+    ).toThrow("enrollment.claims keys must be OIDs");
   });
 });
 
@@ -332,7 +339,7 @@ describe("manifest configuration", () => {
 
     await writeFile(configPath, "not json");
     await expect(loadManifestConfig(configPath)).rejects.toThrow(
-      "failed to parse manifest config JSON",
+      "manifest config file",
     );
 
     await writeFile(
@@ -422,11 +429,11 @@ describe("manifest parsing", () => {
 
     await writeFile(manifestPath, "{]");
     await expect(loadManifestDocument(manifestPath)).rejects.toThrow(
-      "failed to parse manifest JSON",
+      "is not valid JSON",
     );
 
     expect(() => parseManifestDocumentObject({})).toThrow(
-      "manifest file must include a 'manifest' object",
+      "manifest.manifest must be an object",
     );
 
     await rm(dir, { recursive: true, force: true });
@@ -464,11 +471,11 @@ describe("policy and bundle parsing", () => {
     );
 
     await expect(loadBundleDocument(bundlePath)).rejects.toThrow(
-      "each signer must be a non-empty string",
+      "enrollment.signers entries must be non-empty strings",
     );
 
     await writeFile(bundlePath, "{}");
-    await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle is missing 'enrollment'");
+    await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle.enrollment is required");
 
     await writeFile(
       bundlePath,
@@ -484,7 +491,7 @@ describe("policy and bundle parsing", () => {
       }),
     );
 
-    await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle is missing 'manifest'");
+    await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle.manifest is required");
 
     await rm(dir, { recursive: true, force: true });
   });
