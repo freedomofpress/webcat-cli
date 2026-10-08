@@ -201,8 +201,11 @@ and the certificate must have been issued less than `max_age` seconds ago.
 
 ### Sigstore signing
 
-Sigstore signing defaults to the community Fulcio/Rekor services. You can override the
-endpoints with `--fulcio-url`, `--rekor-url`, and `--tsa-url` when signing.
+Sigstore signing defaults to the community Fulcio, Rekor v2 (`log2025-1.rekor.sigstore.dev`)
+and timestamp authority (`timestamp.sigstore.dev`) services. Rekor v2 entries carry no
+integrated time, so a TSA timestamp is always requested with them. You can override the
+endpoints with `--fulcio-url`, `--rekor-url`, and `--tsa-url`, or pass `--rekor-api-version 1`
+to log to the legacy `rekor.sigstore.dev` instead (no TSA unless `--tsa-url` is given).
 
 To sign with Sigstore using an ambient OIDC token (for example, in CI):
 

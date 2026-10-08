@@ -496,3 +496,14 @@ describe("policy and bundle parsing", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+describe("sigstore signing", () => {
+  it("defaults Rekor v2 to the public tile log plus TSA, and v1 to legacy Rekor without a TSA", async () => {
+    const { DEFAULT_REKOR_URL, DEFAULT_REKOR_V2_URL, DEFAULT_TSA_URL, sigstoreEndpoints } = await import("../src/sigstore");
+    expect(sigstoreEndpoints({ rekorApiVersion: 2 })).toEqual({ rekorUrl: DEFAULT_REKOR_V2_URL, tsaUrl: DEFAULT_TSA_URL });
+    expect(sigstoreEndpoints({ rekorApiVersion: 1 })).toEqual({ rekorUrl: DEFAULT_REKOR_URL, tsaUrl: undefined });
+    expect(sigstoreEndpoints({ rekorApiVersion: 2, rekorUrl: "https://log.example", tsaUrl: "https://tsa.example" })).toEqual({
+      rekorUrl: "https://log.example",
+      tsaUrl: "https://tsa.example",
+    });
+  });
+});
