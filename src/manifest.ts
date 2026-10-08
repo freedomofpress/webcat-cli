@@ -1,16 +1,18 @@
-import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { SerializedBundle } from "@sigstore/bundle";
 import { canonicalize } from "./canonicalize.js";
 import {
+  causeOf,
   ensureAbsolutePath,
   ensureNonEmptyString,
+  ensureObject,
   ensureRecordOfStrings,
+  invalid,
+  readJson,
+  sha256,
   toBase64Url,
 } from "./utils.js";
-
-const WASM_EXTENSION = ".wasm";
 
 export interface ManifestConfig {
   app: string;
@@ -27,12 +29,12 @@ export interface ManifestContent extends ManifestConfig {
   timestamp?: string;
 }
 
+export type ManifestSignatures = Record<string, string> | SerializedBundle[];
+
 export interface ManifestDocument {
   manifest: ManifestContent;
   signatures?: ManifestSignatures;
 }
-
-export type ManifestSignatures = Record<string, string> | SerializedBundle[];
 
 export interface DirectoryScanResult {
   files: Map<string, string>;
@@ -44,99 +46,61 @@ export interface DirectoryScanOptions {
   excludePaths?: string[];
 }
 
+const sortedEntries = <T>(record: Record<string, T>): Record<string, T> =>
+  Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)));
+
 export async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
-  const raw = await readFile(configPath, "utf8");
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse manifest config JSON: ${err.message}`);
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("manifest config must be a JSON object");
-  }
+  const parsed = ensureObject(await readJson(configPath, "manifest config"), "manifest config");
 
   const app = ensureNonEmptyString(parsed.app, "config.app");
   try {
     new URL(app);
-  } catch (err: any) {
-    throw new Error(`config.app must be a valid URL: ${err.message}`);
+  } catch (err) {
+    throw invalid(`config.app must be a valid URL: ${causeOf(err)}`);
   }
 
-  const version = ensureNonEmptyString(parsed.version, "config.version");
-  const defaultCsp = ensureNonEmptyString(parsed.default_csp, "config.default_csp");
-  // Remove leading / to default_index. It is automatically appended to dirs whcih
-  // have a ending /
-  let defaultIndex = ensureNonEmptyString(parsed.default_index, "config.default_index");
-  defaultIndex = defaultIndex.replace(/^\/+/, ""); // optional: normalize if user wrote "/index.html"
-  const defaultFallback = ensureAbsolutePath(parsed.default_fallback, "config.default_fallback");
-
-  let wasmList: string[] = [];
-  if (parsed.wasm === undefined) {
-    wasmList = [];
-  } else if (!Array.isArray(parsed.wasm)) {
-    throw new Error("config.wasm must be an array of strings");
-  } else {
-    wasmList = parsed.wasm.map((value: any, index: number) => {
-      if (typeof value !== "string" || value.trim().length === 0) {
-        throw new Error(`config.wasm[${index}] must be a non-empty string`);
-      }
-      return value.trim();
-    });
+  let wasm: string[] = [];
+  if (parsed.wasm !== undefined) {
+    if (!Array.isArray(parsed.wasm)) {
+      throw invalid("config.wasm must be an array of strings");
+    }
+    wasm = parsed.wasm.map((value, index) => ensureNonEmptyString(value, `config.wasm[${index}]`));
   }
 
-  const extraCspRaw = parsed.extra_csp ?? {};
-  const extraCspRecord = ensureRecordOfStrings(extraCspRaw, "config.extra_csp");
-  for (const key of Object.keys(extraCspRecord)) {
+  const extraCsp = ensureRecordOfStrings(parsed.extra_csp ?? {}, "config.extra_csp");
+  for (const key of Object.keys(extraCsp)) {
     if (!key.startsWith("/")) {
-      throw new Error(`config.extra_csp keys must start with '/': ${key}`);
+      throw invalid(`config.extra_csp keys must start with '/', got '${key}'`);
     }
   }
 
   return {
     app,
-    version,
-    default_csp: defaultCsp,
-    default_index: defaultIndex,
-    default_fallback: defaultFallback,
-    wasm: wasmList,
-    extra_csp: extraCspRecord,
+    version: ensureNonEmptyString(parsed.version, "config.version"),
+    default_csp: ensureNonEmptyString(parsed.default_csp, "config.default_csp"),
+    // default_index is appended to directory paths, so it must not carry a leading slash.
+    default_index: ensureNonEmptyString(parsed.default_index, "config.default_index").replace(/^\/+/, ""),
+    default_fallback: ensureAbsolutePath(parsed.default_fallback, "config.default_fallback"),
+    wasm,
+    extra_csp: extraCsp,
   };
 }
 
-export async function scanDirectory(
-  rootDir: string,
-  options: DirectoryScanOptions = {},
-): Promise<DirectoryScanResult> {
-  const absoluteRoot = path.resolve(rootDir);
-  const result: DirectoryScanResult = {
-    files: new Map(),
-    wasm: new Set(),
-  };
-  const includeDotfiles = options.includeDotfiles ?? false;
+export async function scanDirectory(rootDir: string, options: DirectoryScanOptions = {}): Promise<DirectoryScanResult> {
+  const result: DirectoryScanResult = { files: new Map(), wasm: new Set() };
   const excludePaths = (options.excludePaths ?? [])
-    .map((raw) => raw.trim())
-    .filter(Boolean)
-    .map((raw) => raw.replace(/\\/g, "/"))
-    .map((raw) => raw.replace(/^\.?\/*/, ""))
-    .map((raw) => raw.replace(/\/+$/, ""));
-
-  const shouldExclude = (relativePath: string): boolean => {
-    if (excludePaths.length === 0) {
-      return false;
-    }
-    const normalized = relativePath.replace(/\\/g, "/");
-    return excludePaths.some((exclude) => normalized === exclude || normalized.startsWith(`${exclude}/`));
-  };
+    .map((raw) => raw.trim().replace(/\\/g, "/").replace(/^\.?\/*/, "").replace(/\/+$/, ""))
+    .filter(Boolean);
+  const isExcluded = (relativePath: string) =>
+    excludePaths.some((exclude) => relativePath === exclude || relativePath.startsWith(`${exclude}/`));
 
   async function walk(currentDir: string, relativePrefix: string): Promise<void> {
-    const entries = await readdir(currentDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!includeDotfiles && entry.name.startsWith(".")) {
+    for (const entry of await readdir(currentDir, { withFileTypes: true })) {
+      if (!options.includeDotfiles && entry.name.startsWith(".")) {
         continue;
       }
       const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
-      if (shouldExclude(relativePath)) {
+      if (isExcluded(relativePath)) {
         continue;
       }
       const entryPath = path.join(currentDir, entry.name);
@@ -149,9 +113,9 @@ export async function scanDirectory(
       }
       const manifestPath = `/${relativePath}`;
       const contents = await readFile(entryPath);
-      const digest = createHash("sha256").update(contents).digest();
-      const encoded = toBase64Url(digest);
-      if (path.extname(entry.name).toLowerCase() === WASM_EXTENSION) {
+      const encoded = toBase64Url(sha256(contents));
+      const isWasm = path.extname(entry.name).toLowerCase() === ".wasm";
+      if (isWasm) {
         result.wasm.add(encoded);
       } else {
         result.files.set(manifestPath, encoded);
@@ -159,38 +123,36 @@ export async function scanDirectory(
     }
   }
 
-  await walk(absoluteRoot, "");
+  await walk(path.resolve(rootDir), "");
   return result;
 }
 
-export function parseManifestDocumentObject(parsed: any): ManifestDocument {
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("manifest file must contain a JSON object");
+export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
+  if (!scan.files.has(`/${config.default_index}`)) {
+    throw invalid(`config.default_index must name a scanned file, '${config.default_index}' was not found`);
   }
-  if (typeof parsed.manifest !== "object" || parsed.manifest === null || Array.isArray(parsed.manifest)) {
-    throw new Error("manifest file must include a 'manifest' object");
+  if (!scan.files.has(config.default_fallback)) {
+    throw invalid(`config.default_fallback must name a scanned file, '${config.default_fallback}' was not found`);
   }
-  parsed.signatures = parseManifestSignatures(parsed.signatures);
-  const manifest = parsed.manifest;
-  if (typeof manifest.files !== "object" || manifest.files === null || Array.isArray(manifest.files)) {
-    throw new Error("manifest.manifest.files must be an object");
+  return {
+    app: config.app,
+    version: config.version,
+    default_csp: config.default_csp,
+    files: sortedEntries(Object.fromEntries(scan.files)),
+    default_index: config.default_index,
+    default_fallback: config.default_fallback,
+    wasm: Array.from(new Set([...config.wasm, ...scan.wasm])).sort(),
+    extra_csp: sortedEntries(config.extra_csp),
+    ...(timestamp ? { timestamp } : {}),
+  };
+}
+
+function parseBundleList(value: unknown, name: string): SerializedBundle[] {
+  if (!Array.isArray(value)) {
+    throw invalid(`${name} must be an array`);
   }
-  if (manifest.wasm === undefined) {
-    manifest.wasm = [];
-  } else if (!Array.isArray(manifest.wasm)) {
-    throw new Error("manifest.manifest.wasm must be an array");
-  }
-  if (manifest.extra_csp === undefined) {
-    manifest.extra_csp = {};
-  } else if (typeof manifest.extra_csp !== "object" || manifest.extra_csp === null || Array.isArray(manifest.extra_csp)) {
-    throw new Error("manifest.manifest.extra_csp must be an object");
-  }
-  if (manifest.timestamp !== undefined) {
-    if (typeof manifest.timestamp !== "string" || manifest.timestamp.length === 0) {
-      throw new Error("manifest.manifest.timestamp must be a string");
-    }
-  }
-  return parsed as ManifestDocument;
+  value.forEach((entry, index) => ensureObject(entry, `${name}[${index}]`));
+  return value as SerializedBundle[];
 }
 
 function parseManifestSignatures(value: any): ManifestSignatures | undefined {
@@ -198,52 +160,42 @@ function parseManifestSignatures(value: any): ManifestSignatures | undefined {
     return undefined;
   }
   if (Array.isArray(value)) {
-    value.forEach((entry: any, index: number) => {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-        throw new Error(`signatures[${index}] must be an object`);
-      }
-    });
-    return value as SerializedBundle[];
+    return parseBundleList(value, "signatures");
   }
-  if (typeof value !== "object") {
-    throw new Error("signatures must be an object or array");
-  }
-
-  const hasSigsum = Object.prototype.hasOwnProperty.call(value, "sigsum");
-  const hasSigstore = Object.prototype.hasOwnProperty.call(value, "sigstore");
-
-  if (!hasSigsum && !hasSigstore) {
-    return ensureRecordOfStrings(value, "signatures");
-  }
-
+  ensureObject(value, "signatures");
+  const hasSigsum = Object.hasOwn(value, "sigsum");
+  const hasSigstore = Object.hasOwn(value, "sigstore");
   if (hasSigsum && hasSigstore) {
-    throw new Error("signatures cannot include both sigsum and sigstore keys");
+    throw invalid("manifest.signatures must not contain both sigsum and sigstore keys");
   }
   if (hasSigsum) {
     return ensureRecordOfStrings(value.sigsum ?? {}, "signatures.sigsum");
   }
-  if (!Array.isArray(value.sigstore)) {
-    throw new Error("signatures.sigstore must be an array");
+  if (hasSigstore) {
+    return parseBundleList(value.sigstore, "signatures.sigstore");
   }
-  value.sigstore.forEach((entry: any, index: number) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      throw new Error(`signatures.sigstore[${index}] must be an object`);
-    }
-  });
-  return value.sigstore as SerializedBundle[];
+  return ensureRecordOfStrings(value, "signatures");
 }
 
-export async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {
-  const raw = await readFile(manifestPath, "utf8");
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse manifest JSON: ${err.message}`);
+export function parseManifestDocumentObject(parsed: any): ManifestDocument {
+  ensureObject(parsed, "manifest");
+  const manifest = ensureObject(parsed.manifest, "manifest.manifest");
+  manifest.files = ensureRecordOfStrings(manifest.files, "manifest.manifest.files");
+  manifest.wasm ??= [];
+  if (!Array.isArray(manifest.wasm)) {
+    throw invalid("manifest.manifest.wasm must be an array");
   }
-  return parseManifestDocumentObject(parsed);
+  manifest.extra_csp = ensureRecordOfStrings(manifest.extra_csp ?? {}, "manifest.manifest.extra_csp");
+  if (manifest.timestamp !== undefined) {
+    ensureNonEmptyString(manifest.timestamp, "manifest.manifest.timestamp");
+  }
+  parsed.signatures = parseManifestSignatures(parsed.signatures);
+  return parsed as ManifestDocument;
 }
 
-export function canonicalizeManifestBody(document: ManifestDocument): string {
-  return canonicalize(document.manifest);
-}
+export const loadManifestDocument = async (manifestPath: string): Promise<ManifestDocument> =>
+  parseManifestDocumentObject(await readJson(manifestPath, "manifest"));
+
+export const canonicalizeManifestBody = (document: ManifestDocument): string => canonicalize(document.manifest);
+
+export const manifestHash = (document: ManifestDocument): Buffer => sha256(canonicalizeManifestBody(document));

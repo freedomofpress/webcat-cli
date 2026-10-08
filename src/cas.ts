@@ -1,88 +1,59 @@
-import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { buildLeafBytesFromProof } from "./sigsum.js";
+import { causeOf, external, invalid, sha256 } from "./utils.js";
 
 export interface CasWriteResult {
   hash: string;
   filePath: string;
 }
 
-interface CasUploadConfig {
-  endpoint: string;
-  bucket: string;
-  token: string;
-  region: string;
-}
+type Uploader = { client: S3Client; bucket: string };
 
-const casUploadConfig = loadCasUploadConfig();
-let casS3Client: S3Client | null = null;
-
-function loadCasUploadConfig(): CasUploadConfig | null {
-  const endpoint = process.env.WEBCAT_CAS_S3_ENDPOINT;
-  const bucket = process.env.WEBCAT_CAS_S3_BUCKET;
-  const token = process.env.WEBCAT_CAS_S3_TOKEN;
+// Read only when publishing, so unrelated commands never fail on a half-configured environment.
+function uploaderFromEnv(): Uploader | null {
+  const { WEBCAT_CAS_S3_ENDPOINT: endpoint, WEBCAT_CAS_S3_BUCKET: bucket, WEBCAT_CAS_S3_TOKEN: token } = process.env;
   if (!endpoint && !bucket && !token) {
     return null;
   }
   if (!endpoint || !bucket || !token) {
-    const missing = [];
-    if (!endpoint) {
-      missing.push("WEBCAT_CAS_S3_ENDPOINT");
-    }
-    if (!bucket) {
-      missing.push("WEBCAT_CAS_S3_BUCKET");
-    }
-    if (!token) {
-      missing.push("WEBCAT_CAS_S3_TOKEN");
-    }
-    throw new Error(`missing CAS upload environment variables: ${missing.join(", ")}`);
+    throw invalid("WEBCAT_CAS_S3_ENDPOINT, WEBCAT_CAS_S3_BUCKET and WEBCAT_CAS_S3_TOKEN must all be set to upload to the CAS");
   }
-  return {
+  const client = new S3Client({
     endpoint,
-    bucket,
-    token,
     region: process.env.WEBCAT_CAS_S3_REGION ?? "us-east-1",
-  };
+    credentials: { accessKeyId: token, secretAccessKey: token },
+    forcePathStyle: true,
+  });
+  return { client, bucket };
 }
 
-async function uploadCasObject(hash: string, bytes: Uint8Array): Promise<void> {
-  if (!casUploadConfig) {
-    return;
-  }
-  if (!casS3Client) {
-    casS3Client = new S3Client({
-      endpoint: casUploadConfig.endpoint,
-      region: casUploadConfig.region,
-      credentials: {
-        accessKeyId: casUploadConfig.token,
-        secretAccessKey: casUploadConfig.token,
-      },
-      forcePathStyle: true,
+// Stores `data` under ./cas/<hex sha256> and, when an uploader is given, in S3 too.
+export async function writeCasObject(data: Uint8Array | string, uploader: Uploader | null = null): Promise<CasWriteResult> {
+  const bytes = Buffer.from(data as any);
+  const hash = sha256(bytes).toString("hex");
+  const filePath = path.resolve("cas", hash);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, bytes);
+  if (uploader) {
+    await uploader.client.send(new PutObjectCommand({ Bucket: uploader.bucket, Key: hash, Body: bytes })).catch((err) => {
+      throw external(`failed to upload ${hash} to the CAS bucket: ${causeOf(err)}`);
     });
   }
-  await casS3Client.send(
-    new PutObjectCommand({
-      Bucket: casUploadConfig.bucket,
-      Key: hash,
-      Body: bytes,
-    })
-  );
+  return { hash, filePath };
 }
 
-export async function writeCasObject(
-  data: Uint8Array | string,
-  options?: { upload?: boolean }
-): Promise<CasWriteResult> {
-  const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
-  const hash = createHash("sha256").update(bytes).digest("hex");
-  const casDir = path.join(process.cwd(), "cas");
-  await mkdir(casDir, { recursive: true });
-  const filePath = path.join(casDir, hash);
-  await writeFile(filePath, bytes);
-  if (options?.upload) {
-    await uploadCasObject(hash, bytes);
-  }
-  return { hash, filePath };
+// Publishes the objects a monitor needs to walk from a Sigsum leaf back to the manifest:
+// the raw leaf, the checksum preimage (sha256 of the manifest), and the canonical manifest.
+export async function publishSigsumProofToCas(
+  canonicalManifest: string,
+  proofText: string,
+): Promise<{ leaf: CasWriteResult; checksum: CasWriteResult; manifest: CasWriteResult }> {
+  const uploader = uploaderFromEnv();
+  const leaf = await writeCasObject(await buildLeafBytesFromProof(canonicalManifest, proofText), uploader);
+  const checksum = await writeCasObject(sha256(canonicalManifest), uploader);
+  const manifest = await writeCasObject(canonicalManifest, uploader);
+  return { leaf, checksum, manifest };
 }

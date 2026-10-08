@@ -1,5 +1,6 @@
 {
   "enrollment": {
+    "type": "sigsum",
     "policy": "AAECBEZEryq9QPSJWgA7yjUPnVkSqzAaScd_E-W22QXCCl_mHCX4pExjVFfi45HR77yn1MKVGgrvBiJaiB5GuYlirGwoySpaOgVNMXyG_C7ranqyBU1iFxANC-Z97Vt0MjxYBkBBAYE",
     "signers": [
       "KpPZOuuFSyKRA-6fmJAGj_Wn1snx2iwYiPMT240IJm0",
