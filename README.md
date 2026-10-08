@@ -97,7 +97,7 @@ Refer to the GitHub Actions described above.
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 22 or newer.
 - `sigsum-submit` must be available on your `$PATH` for `manifest sign` operations. (See the [installation instructions][#installation] below.)
 - A Sigsum trust policy and keypair for signing manifests.
 - An OIDC identity token in the environment (CI-supported) or interactive login for `manifest sign --type sigstore`.
@@ -112,7 +112,11 @@ To run the installed CLI:
 
 ```sh
 npx webcat --help
+npx webcat --version
 ```
+
+Informational messages are written to stderr, so command output (JSON, hashes) can be
+piped or redirected directly when `--output` is omitted.
 
 Sigsum needs to be installed separately, as it currently is only available in Go binaries:
 
@@ -140,7 +144,7 @@ Example – hash the sample enrollment definition:
 
 ```sh
 npx webcat enrollment hash -i examples/enrollment.json
-# => TSNydkDZBv6QNZ3m7ZuBP9fFj0TD6hHDmzcwu9ulK3A
+# => sMShxw62oTUjfzQ35Q5WOnQria1sXHMdI3e9lqODk6c
 ```
 
 The canonicalized document (useful for audits) can be produced with:
@@ -172,7 +176,7 @@ The `manifest` namespace operates on WEBCAT manifests:
 | `manifest sign` | Sign a manifest with Sigsum (default) or Sigstore and attach proofs/bundles. |
 | `manifest canonicalize` | Canonicalize an existing manifest JSON document. |
 | `manifest hash` | Canonicalize and SHA-256 hash a manifest, outputting a base64url digest. |
-| `manifest verify` | Verify signatures in a manifest (or bundle) against an enrollment and print the policy hash. |
+| `manifest verify` | Verify a manifest (or bundle) against its enrollment: Sigsum signer threshold, or Sigstore bundles against the enrollment claims and trusted root. Exits 1 on failure. |
 
 `manifest generate` skips dotfiles and dotfolders by default; pass `--include-dotfiles` to include them. Use
 `--exclude <path>` (repeatable) to omit specific files or directories from the scan.
@@ -181,14 +185,19 @@ Example – hash the provided manifest:
 
 ```sh
 npx webcat manifest hash -i examples/manifest.json
-# => 8OYr4SFw2U2NR2efE69FAKZicf_2QbUGxXT7kxN1C80
+# => FzuGGV73J4ayAyrZBLw8NPT364Djuu8h9Mdr1xiMM-o
 ```
 
-Example – verify a bundle:
+Example – verify a bundle, or an enrollment plus a signed manifest:
 
 ```sh
 npx webcat manifest verify examples/bundle.json
+npx webcat manifest verify --enrollment enrollment.json --manifest manifest.json
 ```
+
+Sigstore verification applies the same rules as the browser extension: every enrollment
+claim must match the signing certificate (a value starting with `^` is a prefix match),
+and the certificate must have been issued less than `max_age` seconds ago.
 
 ### Sigstore signing
 
@@ -234,6 +243,17 @@ npx webcat manifest sign \
   --oidc-client-id example-client \
   --interactive
 ```
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | The command ran and the answer is negative: `manifest verify` did not pass |
+| 2 | Invalid input: fix the command line or the file named in the error |
+| 3 | External failure: a network service, the `sigsum-*` tools, or the environment |
+
+Errors are printed to stderr as `Error: <message>`. Messages name the CLI flag (`--max-age`) or the JSON path from the file root (`enrollment.max_age`, `config.app`) they refer to.
 
 ## Bundle helpers
 
