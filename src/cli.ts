@@ -17,6 +17,8 @@ import { fetchTimestampFromPolicy, signManifestWithSigsum, sigsumEnrollmentFromP
 import {
   DEFAULT_FULCIO_URL,
   DEFAULT_REKOR_URL,
+  DEFAULT_REKOR_V2_URL,
+  DEFAULT_TSA_URL,
   ISSUER_V2_OID,
   SAN_OID,
   SIGSTORE_CLAIM_FLAGS,
@@ -201,8 +203,13 @@ manifest
   .option("--token-domain <domain>", "Domain name to use for Sigsum rate limiting")
   .addOption(new Option("--bundle-type <type>", "Sigstore bundle type to generate").choices(["message", "dsse"]).default("message"))
   .option("--fulcio-url <url>", "Sigstore Fulcio base URL", DEFAULT_FULCIO_URL)
-  .option("--rekor-url <url>", "Sigstore Rekor base URL", DEFAULT_REKOR_URL)
-  .option("--tsa-url <url>", "Sigstore timestamp authority base URL")
+  .addOption(
+    new Option("--rekor-api-version <version>", "Rekor API major version: 2 (tile-based log, timestamped by a TSA) or 1 (legacy rekor.sigstore.dev)")
+      .choices(["1", "2"])
+      .default("2"),
+  )
+  .option("--rekor-url <url>", `Sigstore Rekor base URL (default: ${DEFAULT_REKOR_V2_URL} for v2, ${DEFAULT_REKOR_URL} for v1)`)
+  .option("--tsa-url <url>", `Sigstore timestamp authority base URL (default: ${DEFAULT_TSA_URL} for Rekor v2, none for v1)`)
   .option("--oidc-audience <value>", "OIDC audience for CI identity provider", "sigstore")
   .option("--oidc-issuer <url>", "OIDC issuer for interactive login", SIGSTORE_OIDC_ISSUER)
   .option("--oidc-client-id <value>", "OIDC client ID for interactive login", SIGSTORE_OIDC_CLIENT_ID)
@@ -248,6 +255,7 @@ manifest
         bundleType: options.bundleType,
         fulcioUrl: options.fulcioUrl,
         rekorUrl: options.rekorUrl,
+        rekorApiVersion: Number(options.rekorApiVersion) as 1 | 2,
         tsaUrl: options.tsaUrl,
         identityProvider,
       });
