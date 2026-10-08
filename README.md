@@ -139,6 +139,8 @@ and/or compatibility flags `--issuer` + `--identity`) and either `--trusted-root
 | `enrollment create` | Compile a Sigsum policy file and create a normalized enrollment JSON document. |
 | `enrollment canonicalize` | Canonicalize an enrollment JSON document using canonical JSON rules. |
 | `enrollment hash` | Canonicalize and SHA-256 hash an enrollment, outputting a base64url digest. |
+| `enrollment submit` | Ask the WEBCAT oracles to observe the enrollment a domain serves. |
+| `enrollment status` | Show a domain's served, on-chain, and published enrollment hashes. |
 
 Example – hash the sample enrollment definition:
 
@@ -165,6 +167,26 @@ npx webcat enrollment create \
   --claim 1.3.6.1.4.1.57264.1.11=platform-hosted \
   --max-age 3600
 ```
+
+### Submitting and checking an enrollment
+
+Once `enrollment.json` is served at `https://<domain>/.well-known/webcat/enrollment.json`,
+ask the network's oracles to observe it. Each oracle hands out a small proof-of-work
+challenge, fetches the file itself, and votes for its hash on the enrollment chain; after a
+quorum and a cool-down delay the hash becomes canonical and appears in the published list.
+
+```sh
+npx webcat enrollment submit example.com -e enrollment.json   # -e checks the served file matches
+npx webcat enrollment status example.com
+```
+
+`enrollment status` prints the hash the domain serves, what the chain holds (canonical,
+pending, and live oracle votes), and the entry in the published list. Hashes are hex
+`sha256` of the canonical enrollment, the same value `enrollment hash` prints in base64url.
+`enrollment submit` refuses to run when the domain serves no enrollment unless `--unenroll`
+is given, because oracles would then vote to remove the domain. `--dry-run` performs every
+check and the proof of work without submitting. `--chain-api` and `--oracle` point at other
+infrastructure.
 
 ## Manifest helpers
 

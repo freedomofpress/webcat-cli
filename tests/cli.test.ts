@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
 import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
 import { loadBundleDocument } from "../src/bundle";
+import { parseListLeaves, solvePow, toFqdn } from "../src/chain";
 import { writeCasObject } from "../src/cas";
 import {
   loadManifestConfig,
@@ -494,5 +495,25 @@ describe("policy and bundle parsing", () => {
     await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle.manifest is required");
 
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("enrollment chain client", () => {
+  it("solves proof of work challenges", () => {
+    const challenge = "ca8dc16136a1df96d1c258bafbb23b096f7e1c28d22da0237dccd05d3c739f0e";
+    const nonce = solvePow(challenge, 12);
+    const digest = createHash("sha256").update(challenge + nonce).digest();
+    expect(digest[0]).toBe(0);
+    expect(digest[1] >> 4).toBe(0);
+  });
+
+  it("decodes list.json leaves into domain -> hash", () => {
+    const entries = parseListLeaves({
+      block_height: 1,
+      leaves: [["canonical/.cat.lsd", "0a20" + "ab".repeat(32)], ["canonical/.org.endeixis.www", "0a20" + "cd".repeat(32)]],
+    });
+    expect(entries.get("lsd.cat.")).toBe("ab".repeat(32));
+    expect(entries.get("www.endeixis.org.")).toBe("cd".repeat(32));
+    expect(toFqdn("Example.COM")).toBe("example.com.");
   });
 });
