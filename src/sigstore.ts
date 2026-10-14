@@ -1,17 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import {
-  AllOf,
-  EXTENSION_OID_OTHERNAME,
-  PolicyError,
-  SigstoreVerifier,
-  TrustedRootProvider,
-  type SigstoreBundle,
-  type TrustedRoot,
-  type VerificationPolicy,
-  type X509Certificate,
-} from "@freedomofpress/sigstore-browser";
+import { TrustedRootProvider } from "@freedomofpress/sigstore-browser";
 import { bundleToJSON } from "@sigstore/bundle";
 import {
   CIContextProvider,
@@ -25,7 +15,6 @@ import {
   type IdentityProvider,
   type Witness,
 } from "@sigstore/sign";
-import type { SigstoreEnrollmentInput } from "./enrollment.js";
 import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
 import { causeOf, ensureObject, external, invalid, log, sha256 } from "./utils.js";
 
@@ -189,94 +178,3 @@ export async function signManifestWithSigstore(document: ManifestDocument, optio
 
 export const staticIdentityProvider = (token: string): IdentityProvider => ({ getToken: async () => token });
 export const ciIdentityProvider = (audience: string): IdentityProvider => new CIContextProvider(audience);
-
-// ---------------------------------------------------------------------------
-// Verification (mirrors the WEBCAT extension's validators so CLI results match what browsers enforce)
-
-class ClaimPolicy implements VerificationPolicy {
-  constructor(
-    private readonly oid: string,
-    private readonly expected: string,
-  ) {}
-
-  // A leading "^" turns the expected value into a prefix match.
-  private matches(got: string): boolean {
-    return this.expected.startsWith("^") ? got.startsWith(this.expected.slice(1)) : got === this.expected;
-  }
-
-  verify(cert: X509Certificate): void {
-    if (this.oid === SAN_OID) {
-      const san = cert.extSubjectAltName;
-      if (!san) {
-        throw new PolicyError("certificate has no SubjectAlternativeName");
-      }
-      const names = [san.rfc822Name, san.uri, san.otherName(EXTENSION_OID_OTHERNAME)].filter((n): n is string => !!n);
-      if (!names.some((n) => this.matches(n))) {
-        throw new PolicyError(`SAN mismatch for ${SAN_OID}: expected '${this.expected}', got '${names.join(", ")}'`);
-      }
-      return;
-    }
-    const ext = cert.extension(this.oid);
-    if (!ext) {
-      throw new PolicyError(`certificate has no extension ${this.oid}`);
-    }
-    let got: string;
-    try {
-      // Fulcio v2 extensions wrap a DER UTF8String; v1 extensions are a raw OCTET STRING.
-      const inner = ext.valueObj.subs[0]?.value;
-      got = new TextDecoder().decode(inner?.length ? inner : ext.value);
-    } catch {
-      throw new PolicyError(`failed to decode extension ${this.oid}`);
-    }
-    if (!this.matches(got)) {
-      throw new PolicyError(`extension ${this.oid} mismatch: expected '${this.expected}', got '${got}'`);
-    }
-  }
-}
-
-class CertFreshnessPolicy implements VerificationPolicy {
-  constructor(private readonly maxAgeSeconds: number) {}
-
-  verify(cert: X509Certificate): void {
-    const issued = Math.floor(cert.notBefore.getTime() / 1000);
-    if (Math.floor(Date.now() / 1000) > issued + this.maxAgeSeconds) {
-      throw new PolicyError(`certificate is too old: issued at ${issued}, enrollment.max_age is ${this.maxAgeSeconds}s`);
-    }
-  }
-}
-
-export interface BundleVerification {
-  index: number;
-  ok: boolean;
-  message?: string;
-}
-
-export async function verifySigstoreManifest(
-  enrollment: SigstoreEnrollmentInput,
-  document: ManifestDocument,
-): Promise<BundleVerification[]> {
-  if (document.signatures && !Array.isArray(document.signatures)) {
-    throw invalid("manifest.signatures contains sigsum proofs but enrollment.type is sigstore");
-  }
-  const bundles = document.signatures ?? [];
-  if (bundles.length === 0) {
-    return [];
-  }
-  const verifier = new SigstoreVerifier();
-  await verifier.loadSigstoreRoot(enrollment.trusted_root as unknown as TrustedRoot);
-  const policy = new AllOf([
-    ...Object.entries(enrollment.claims).map(([oid, expected]) => new ClaimPolicy(oid, expected)),
-    new CertFreshnessPolicy(enrollment.max_age),
-  ]);
-  const data = new TextEncoder().encode(canonicalizeManifestBody(document));
-  const results: BundleVerification[] = [];
-  for (const [index, bundle] of bundles.entries()) {
-    try {
-      const ok = await verifier.verifyArtifactPolicy(policy, bundle as unknown as SigstoreBundle, data);
-      results.push(ok ? { index, ok } : { index, ok, message: "verification failed" });
-    } catch (err) {
-      results.push({ index, ok: false, message: causeOf(err) });
-    }
-  }
-  return results;
-}

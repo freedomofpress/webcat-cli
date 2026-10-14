@@ -9,6 +9,7 @@ import { loadBundleDocument } from "../src/bundle";
 import { parseListLeaves, solvePow, toFqdn } from "../src/chain";
 import { writeCasObject } from "../src/cas";
 import {
+  buildManifest,
   loadManifestConfig,
   loadManifestDocument,
   parseManifestDocumentObject,
@@ -16,23 +17,12 @@ import {
 } from "../src/manifest";
 import {
   decodeKeyMaterial,
-  ensureAbsolutePath,
-  ensureNonEmptyString,
-  ensureRecordOfStrings,
   hexToBase64Url,
   parseInteger,
   toBase64Url,
   validateCasUrl,
   validateMaxAge,
 } from "../src/utils";
-
-describe("canonical JSON", () => {
-  it("sorts keys, escapes only quotes and backslashes, rejects floats", async () => {
-    const { canonicalize } = await import("../src/canonicalize");
-    expect(canonicalize({ b: [1, true, null, "q\"\\\n"], a: { z: "", y: 0 } })).toBe('{"a":{"y":0,"z":""},"b":[1,true,null,"q\\"\\\\\n"]}');
-    expect(() => canonicalize({ x: 1.5 })).toThrow(TypeError);
-  });
-});
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -102,6 +92,7 @@ describe("enrollment helpers", () => {
       threshold: 1,
       maxAge: 1_000_000,
       casUrl: "https://example.com",
+      logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
     });
 
     expect(enrollment.type).toBe("sigsum");
@@ -122,8 +113,9 @@ describe("enrollment helpers", () => {
         threshold: 1,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
-    ).toThrow("enrollment.signers must contain at least one signer");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
 
     expect(() =>
       buildEnrollmentObject({
@@ -133,6 +125,7 @@ describe("enrollment helpers", () => {
         threshold: 1,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
     ).toThrow("enrollment.signers must not contain duplicates");
 
@@ -144,8 +137,9 @@ describe("enrollment helpers", () => {
         threshold: 3,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
-    ).toThrow("enrollment.threshold must be between 1 and the number of signers");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
 
     expect(() =>
       buildEnrollmentObject({
@@ -155,8 +149,9 @@ describe("enrollment helpers", () => {
         threshold: 0,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
-    ).toThrow("enrollment.threshold must be between 1 and the number of signers");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
     expect(() =>
       buildEnrollmentObject({
@@ -166,6 +161,7 @@ describe("enrollment helpers", () => {
         threshold: 1,
         maxAge: 60 * 60 * 24 * 8,
         casUrl: "http://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
     ).toThrow("enrollment.cas_url must use https://");
   });
@@ -205,6 +201,7 @@ describe("enrollment helpers", () => {
         threshold: 1,
         max_age: 1_000_000,
         cas_url: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
     );
 
@@ -230,17 +227,19 @@ describe("enrollment helpers", () => {
         threshold: 1,
         max_age: 1,
         cas_url: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
-    ).toThrow("enrollment.policy must be a base64url string");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_POLICY_LENGTH");
 
     expect(() =>
       parseEnrollmentObject({
         type: "sigsum",
         policy: "policy",
-        signers: ["a", "a"],
+        signers: [hexToBase64Url(baseSigner), hexToBase64Url(baseSigner)],
         threshold: 1,
-        max_age: 1,
+        max_age: 1_000_000,
         cas_url: "https://example.com",
+        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
       }),
     ).toThrow("enrollment.signers must not contain duplicates");
 
@@ -251,7 +250,7 @@ describe("enrollment helpers", () => {
         claims: { "2.5.29.17": "id" },
         max_age: 1_000_000,
       }),
-    ).toThrow("enrollment.trusted_root must be an object");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_TRUSTED_ROOT_MISSING");
 
     expect(() =>
       parseEnrollmentObject({
@@ -261,26 +260,6 @@ describe("enrollment helpers", () => {
         max_age: 1_000_000,
       }),
     ).toThrow("enrollment.claims keys must be OIDs");
-  });
-});
-
-describe("string and path validation", () => {
-  it("ensures non-empty strings", () => {
-    expect(() => ensureNonEmptyString("", "field")).toThrow("field must be a non-empty string");
-    expect(ensureNonEmptyString(" value ", "field")).toBe("value");
-  });
-
-  it("ensures absolute paths", () => {
-    expect(() => ensureAbsolutePath("relative", "p")).toThrow("p must start with '/'");
-    expect(ensureAbsolutePath("/absolute", "p")).toBe("/absolute");
-  });
-
-  it("ensures records of strings", () => {
-    expect(() => ensureRecordOfStrings([], "record")).toThrow("record must be an object");
-    expect(() => ensureRecordOfStrings({ key: "" }, "record")).toThrow(
-      "record entries must be non-empty strings",
-    );
-    expect(ensureRecordOfStrings({ a: "x" }, "record")).toEqual({ a: "x" });
   });
 });
 
@@ -343,22 +322,17 @@ describe("manifest configuration", () => {
       "manifest config file",
     );
 
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        app: "https://example.com",
-        version: "1.0.0",
-        default_csp: "csp",
-        default_index: "index.html",
-        default_fallback: "relative.html",
-      }),
-    );
-
-    await expect(loadManifestConfig(configPath)).rejects.toThrow(
-      "config.default_fallback must start with '/'",
-    );
-
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("builds manifests with the extension's rules", () => {
+    const hash = toBase64Url(createHash("sha256").update("x").digest());
+    const scan = { files: new Map([["/index.html", hash]]), wasm: new Set<string>() };
+    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
+    expect(buildManifest(config, scan).files).toEqual({ "/index.html": hash });
+    expect(() => buildManifest({ ...config, default_fallback: "/missing.html" }, scan)).toThrow("config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE");
+    expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
+    expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
   });
 });
 
@@ -409,24 +383,28 @@ describe("manifest parsing", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
     const manifestPath = path.join(dir, "manifest.json");
 
+    const hash = toBase64Url(createHash("sha256").update("x").digest());
     const manifest = {
       manifest: {
-        files: {},
+        files: { "/index.html": hash },
         wasm: [],
         extra_csp: {},
         timestamp: "2024-01-01T00:00:00Z",
         app: "app",
         version: "1",
-        default_csp: "csp",
+        default_csp: "default-src 'none'",
         default_index: "index.html",
-        default_fallback: "/error.html",
+        default_fallback: "/index.html",
       },
       signatures: {},
     };
 
     await writeFile(manifestPath, JSON.stringify(manifest));
     const loaded = await loadManifestDocument(manifestPath);
-    expect(Object.keys(loaded.manifest.files)).toHaveLength(0);
+    expect(loaded.manifest.files).toEqual({ "/index.html": hash });
+
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, manifest: { ...manifest.manifest, files: { "/index.html": "nothash" } } }));
+    await expect(loadManifestDocument(manifestPath)).rejects.toThrow("manifest.manifest: ERR_WEBCAT_MANIFEST_FILES_MALFORMED (/index.html)");
 
     await writeFile(manifestPath, "{]");
     await expect(loadManifestDocument(manifestPath)).rejects.toThrow(
@@ -471,9 +449,7 @@ describe("policy and bundle parsing", () => {
       }),
     );
 
-    await expect(loadBundleDocument(bundlePath)).rejects.toThrow(
-      "enrollment.signers entries must be non-empty strings",
-    );
+    await expect(loadBundleDocument(bundlePath)).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_LOGS_MALFORMED");
 
     await writeFile(bundlePath, "{}");
     await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle.enrollment is required");
@@ -512,8 +488,8 @@ describe("enrollment chain client", () => {
       block_height: 1,
       leaves: [["canonical/.cat.lsd", "0a20" + "ab".repeat(32)], ["canonical/.org.endeixis.www", "0a20" + "cd".repeat(32)]],
     });
-    expect(entries.get("lsd.cat.")).toBe("ab".repeat(32));
-    expect(entries.get("www.endeixis.org.")).toBe("cd".repeat(32));
+    expect(entries.get("lsd.cat")).toBe("ab".repeat(32));
+    expect(entries.get("www.endeixis.org")).toBe("cd".repeat(32));
     expect(toFqdn("Example.COM")).toBe("example.com.");
   });
 });

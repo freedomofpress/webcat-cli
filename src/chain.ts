@@ -1,11 +1,12 @@
 // Client for the WEBCAT enrollment chain (felidae): oracle submission and status queries.
 // Protocol reference: https://github.com/freedomofpress/webcat-infra-chain
-import { canonicalize } from "./canonicalize.js";
-import { EnrollmentInput, parseEnrollmentObject } from "./enrollment.js";
+import { defaults } from "@freedomofpress/webcat/config";
+import { extractHostname, extractRawHash } from "@freedomofpress/webcat/webcat/parsers";
+import { type Enrollment, canonicalizeEnrollment, parseEnrollmentObject } from "./enrollment.js";
 import { causeOf, external, invalid, sha256 } from "./utils.js";
 
 export const DEFAULT_CHAIN_API = "https://webcat-sentry-1.freedom.press";
-export const DEFAULT_LIST_URL = "https://webcat.freedom.press/list.json";
+export const DEFAULT_LIST_URL = `${defaults.endpoint}list.json`; // the extension's own update endpoint
 export const WELL_KNOWN_PATH = "/.well-known/webcat/enrollment.json";
 
 export interface Oracle {
@@ -36,7 +37,7 @@ export interface SubmitResult {
 export const toFqdn = (domain: string): string => domain.trim().replace(/\.+$/, "").toLowerCase() + ".";
 export const bareDomain = (domain: string): string => toFqdn(domain).slice(0, -1);
 
-export const enrollmentHashHex = (enrollment: EnrollmentInput): string => sha256(canonicalize(enrollment)).toString("hex");
+export const enrollmentHashHex = (enrollment: Enrollment): string => sha256(canonicalizeEnrollment(enrollment)).toString("hex");
 
 async function fetchJson(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, init).catch((err) => {
@@ -54,7 +55,7 @@ const joinUrl = (base: string, path: string): string => `${base.replace(/\/+$/, 
 
 // Fetches the enrollment a domain currently serves, exactly like an oracle would.
 // Returns null when the domain answers 404/410 (which oracles record as an unenrollment vote).
-export async function fetchServedEnrollment(domain: string): Promise<{ hash: string; enrollment: EnrollmentInput } | null> {
+export async function fetchServedEnrollment(domain: string): Promise<{ hash: string; enrollment: Enrollment } | null> {
   const url = `https://${bareDomain(domain)}${WELL_KNOWN_PATH}`;
   const response = await fetch(url, { redirect: "follow" }).catch((err) => {
     throw external(`failed to fetch ${url}: ${causeOf(err)}`);
@@ -89,20 +90,13 @@ export async function fetchDomainStatus(chainApi: string, domain: string): Promi
   };
 }
 
-// list.json (and /canonical/leaves) keys are "canonical/" + the FQDN labels reversed, e.g.
-// "canonical/.cat.lsd" for "lsd.cat."; values are protobuf bytes field 1 (0x0a 0x20) + 32-byte hash.
-export function parseListLeaves(list: { block_height: number; leaves: [string, string][] }): Map<string, string> {
-  const entries = new Map<string, string>();
-  for (const [key, value] of list.leaves) {
-    const domain = key.replace(/^canonical\//, "").split(".").reverse().join(".");
-    entries.set(domain, value.startsWith("0a20") ? value.slice(4) : value);
-  }
-  return entries;
-}
+// list.json leaves are decoded exactly as the extension does: bare domain -> hex sha256 of the canonical enrollment.
+export const parseListLeaves = (list: { block_height: number; leaves: [string, string][] }): Map<string, string> =>
+  new Map(list.leaves.map(([key, value]) => [extractHostname(key), Buffer.from(extractRawHash(value)).toString("hex")]));
 
 export async function fetchListEntry(listUrl: string, domain: string): Promise<{ blockHeight: number; hash: string | null }> {
   const list = await fetchJson(listUrl);
-  return { blockHeight: list.block_height, hash: parseListLeaves(list).get(toFqdn(domain)) ?? null };
+  return { blockHeight: list.block_height, hash: parseListLeaves(list).get(bareDomain(domain)) ?? null };
 }
 
 // ---------------------------------------------------------------------------

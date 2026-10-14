@@ -3,26 +3,18 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parsePolicyText } from "@freedomofpress/sigsum/dist/config.js";
-import { hashKey, verifyCosignedTreeHead, verifySignedTreeHead } from "@freedomofpress/sigsum/dist/crypto.js";
 import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler.js";
-import { SigsumProof, parseCosignedTreeHead } from "@freedomofpress/sigsum/dist/proof.js";
-import { Base64KeyHash, Hash, Leaf, RawPublicKey } from "@freedomofpress/sigsum/dist/types.js";
-import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify.js";
-import type { SigsumEnrollmentInput } from "./enrollment.js";
-import { ManifestDocument, canonicalizeManifestBody, manifestHash } from "./manifest.js";
-import { causeOf, decodeKeyMaterial, decodePolicyBytes, external, hexToBase64Url, invalid, sha256, toBase64Url } from "./utils.js";
+import { SigsumProof } from "@freedomofpress/sigsum/dist/proof.js";
+import { Hash, Leaf } from "@freedomofpress/sigsum/dist/types.js";
+import { witnessTimestampsFromCosignedTreeHead } from "@freedomofpress/webcat/webcat/validators";
+import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
+import { causeOf, external, hexToBase64Url, invalid, sha256, toBase64Url } from "./utils.js";
 
 export interface SigsumSignOptions {
   policyFile: string;
   key: string;
   tokenSigningKey?: string;
   tokenDomain?: string;
-}
-
-export interface SignerVerification {
-  signer: string;
-  ok: boolean;
-  message?: string;
 }
 
 function runSigsum(binary: string, args: string[], stdio: "pipe" | "inherit"): Promise<string> {
@@ -106,33 +98,6 @@ export async function signManifestWithSigsum(document: ManifestDocument, options
   }
 }
 
-export async function verifySigsumManifest(
-  enrollment: SigsumEnrollmentInput,
-  document: ManifestDocument,
-): Promise<SignerVerification[]> {
-  const hash = new Uint8Array(manifestHash(document));
-  const compiledPolicy = decodePolicyBytes(enrollment.policy, "enrollment.policy");
-  if (Array.isArray(document.signatures)) {
-    throw invalid("manifest.signatures contains Sigstore bundles but enrollment.type is sigsum");
-  }
-  const proofs = document.signatures ?? {};
-  return Promise.all(
-    enrollment.signers.map(async (signer): Promise<SignerVerification> => {
-      const proofText = proofs[signer];
-      if (!proofText) {
-        return { signer, ok: false, message: "no proof in manifest.signatures" };
-      }
-      try {
-        const key = new RawPublicKey(new Uint8Array(decodeKeyMaterial(signer, "enrollment signer")));
-        const ok = await verifyHashWithCompiledPolicy(hash, key, compiledPolicy, proofText);
-        return ok ? { signer, ok } : { signer, ok, message: "invalid proof" };
-      } catch (err) {
-        return { signer, ok: false, message: causeOf(err) };
-      }
-    }),
-  );
-}
-
 // Rebuilds the raw Sigsum leaf (checksum = sha256(sha256(manifest))) so monitors can match log entries.
 export async function buildLeafBytesFromProof(canonicalManifest: string, proofText: string): Promise<Uint8Array> {
   const proof = await SigsumProof.fromAscii(proofText);
@@ -140,10 +105,10 @@ export async function buildLeafBytesFromProof(canonicalManifest: string, proofTe
   return new Leaf(checksum, proof.leaf.Signature, proof.leaf.KeyHash).toBytes();
 }
 
-// Fetches a cosigned tree head from one of the policy's logs and returns it verbatim once it
-// is signed by the log and cosigned by a witness quorum.
+// Fetches a cosigned tree head from one of the policy's logs and returns it verbatim once the
+// extension's validator accepts it (signed by the log, cosigned by a witness quorum).
 export async function fetchTimestampFromPolicy(policyText: string): Promise<string> {
-  const [, policy] = await parsePolicy(policyText);
+  const [compiled, policy] = await parsePolicy(policyText);
   const logs = Array.from(policy.logs.values()).filter((entity) => entity.url);
   if (logs.length === 0) {
     throw invalid("policy file must list at least one log with a URL to fetch a timestamp from");
@@ -157,20 +122,8 @@ export async function fetchTimestampFromPolicy(policyText: string): Promise<stri
     throw external(`failed to fetch timestamp from ${requestUrl}: HTTP ${response.status} ${response.statusText}`);
   }
   const text = (await response.text()).trim();
-  const treeHead = parseCosignedTreeHead(text.split(/\r?\n/));
-  const logKeyHash = await hashKey(log.publicKey);
-  if (!(await verifySignedTreeHead(treeHead.SignedTreeHead, log.publicKey, logKeyHash))) {
-    throw external(`failed to verify timestamp from ${requestUrl}: tree head signature is invalid`);
-  }
-  const present = new Set<Base64KeyHash>();
-  for (const [keyHash, witness] of policy.witnesses) {
-    const cosig = Base64KeyHash.lookup(treeHead.Cosignatures, keyHash);
-    if (cosig && (await verifyCosignedTreeHead(treeHead.SignedTreeHead.TreeHead, witness.publicKey, logKeyHash, cosig))) {
-      present.add(keyHash);
-      if (policy.quorum.isQuorum(present)) {
-        return text;
-      }
-    }
-  }
-  throw external(`failed to verify timestamp from ${requestUrl}: witness quorum not met`);
+  await witnessTimestampsFromCosignedTreeHead(compiled, text).catch((err) => {
+    throw external(`failed to verify timestamp from ${requestUrl}: ${causeOf(err)}`);
+  });
+  return text;
 }

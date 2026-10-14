@@ -1,111 +1,57 @@
-import {
-  OID_RE,
-  decodeKeyMaterial,
-  ensureObject,
-  ensureRecordOfStrings,
-  invalid,
-  parseInteger,
-  readJson,
-  toBase64Url,
-  validateCasUrl,
-  validateMaxAge,
-} from "./utils.js";
+import { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
+import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
+import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
+import { OID_RE, check, decodeKeyMaterial, ensureObject, invalid, parseInteger, readJson, toBase64Url, validateCasUrl, validateMaxAge } from "./utils.js";
 
-export interface SigsumEnrollmentInput {
-  type: "sigsum";
-  policy: string;
-  signers: string[];
-  threshold: number;
-  max_age: number;
-  cas_url: string;
-  logs?: Record<string, string>;
-}
-
-export interface SigstoreEnrollmentInput {
-  type: "sigstore";
-  trusted_root: Record<string, unknown>;
-  claims: Record<string, string>;
-  max_age: number;
-}
-
-export type EnrollmentInput = SigsumEnrollmentInput | SigstoreEnrollmentInput;
+export { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment };
 
 export const parseSignerKey = (value: string): string => toBase64Url(decodeKeyMaterial(value, "--signer"));
-
-function parseThreshold(value: number | string, signerCount: number): number {
-  const threshold = parseInteger(value, "enrollment.threshold");
-  if (threshold < 1 || threshold > signerCount) {
-    throw invalid(`enrollment.threshold must be between 1 and the number of signers (${signerCount})`);
-  }
-  return threshold;
-}
-
-function parseMaxAge(value: number | string): number {
-  const maxAge = parseInteger(value, "enrollment.max_age");
-  validateMaxAge(maxAge, "enrollment.max_age");
-  return maxAge;
-}
-
-function parseClaims(value: unknown): Record<string, string> {
-  const claims = ensureRecordOfStrings(value, "enrollment.claims");
-  if (Object.keys(claims).some((oid) => !OID_RE.test(oid))) {
-    throw invalid("enrollment.claims keys must be OIDs");
-  }
-  return claims;
-}
 
 // CLI-flag shape (camelCase, signer keys in any encoding) -> validated enrollment.
 export function buildEnrollmentObject(
   o:
     | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; casUrl: string; logs?: Record<string, string> }
     | { type: "sigstore"; trustedRoot: unknown; claims: unknown; maxAge: number | string },
-): EnrollmentInput {
+): Enrollment {
+  const max_age = parseInteger(o.maxAge, "--max-age");
   return parseEnrollmentObject(
     o.type === "sigstore"
-      ? { type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age: o.maxAge }
-      : { type: "sigsum", policy: o.policy, signers: o.signers.map(parseSignerKey), threshold: o.threshold, max_age: o.maxAge, cas_url: o.casUrl, logs: o.logs },
+      ? { type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }
+      : { type: "sigsum", policy: o.policy, signers: o.signers.map(parseSignerKey), threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs },
   );
 }
 
-export function parseEnrollmentObject(parsed: any): EnrollmentInput {
-  ensureObject(parsed, "enrollment");
-  const type = parsed.type ?? "sigsum";
-  if (type === "sigstore") {
-    return {
-      type: "sigstore",
-      trusted_root: ensureObject(parsed.trusted_root, "enrollment.trusted_root"),
-      claims: parseClaims(parsed.claims),
-      max_age: parseMaxAge(parsed.max_age),
-    };
+// The extension's validators decide what an enrollment is. The CLI only adds authoring guards the
+// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, CAS URL, max_age range.
+export function parseEnrollmentObject(parsed: unknown): Enrollment {
+  const e = ensureObject(parsed, "enrollment");
+  const type = e.type ?? EnrollmentTypes.Sigsum; // legacy enrollments predate the type field
+  if (type === EnrollmentTypes.Sigstore) {
+    const enrollment = { ...e, type } as SigstoreEnrollment;
+    check(validateSigstoreEnrollment(enrollment), "enrollment");
+    if (Object.keys(enrollment.claims).some((oid) => !OID_RE.test(oid))) {
+      throw invalid("enrollment.claims keys must be OIDs");
+    }
+    validateMaxAge(enrollment.max_age, "enrollment.max_age");
+    return enrollment;
   }
-  if (type !== "sigsum") {
+  if (type !== EnrollmentTypes.Sigsum) {
     throw invalid("enrollment.type must be 'sigsum' or 'sigstore'");
   }
-
-  if (typeof parsed.policy !== "string" || parsed.policy.length === 0) {
-    throw invalid("enrollment.policy must be a base64url string");
+  const enrollment = { ...e, type } as SigsumEnrollment;
+  check(validateSigsumEnrollment(enrollment), "enrollment");
+  for (const signer of enrollment.signers) {
+    decodeKeyMaterial(signer, "enrollment.signers");
   }
-  if (!Array.isArray(parsed.signers) || parsed.signers.length === 0) {
-    throw invalid("enrollment.signers must contain at least one signer");
-  }
-  if (parsed.signers.some((s: unknown) => typeof s !== "string" || s.length === 0)) {
-    throw invalid("enrollment.signers entries must be non-empty strings");
-  }
-  if (new Set(parsed.signers).size !== parsed.signers.length) {
+  if (new Set(enrollment.signers).size !== enrollment.signers.length) {
     throw invalid("enrollment.signers must not contain duplicates");
   }
-  validateCasUrl(parsed.cas_url, "enrollment.cas_url");
-
-  return {
-    type: "sigsum",
-    policy: parsed.policy,
-    signers: parsed.signers,
-    threshold: parseThreshold(parsed.threshold, parsed.signers.length),
-    max_age: parseMaxAge(parsed.max_age),
-    cas_url: parsed.cas_url,
-    ...(parsed.logs !== undefined ? { logs: ensureRecordOfStrings(parsed.logs, "enrollment.logs") } : {}),
-  };
+  validateCasUrl(enrollment.cas_url, "enrollment.cas_url");
+  validateMaxAge(enrollment.max_age, "enrollment.max_age");
+  return enrollment;
 }
 
-export const loadEnrollment = async (path: string): Promise<EnrollmentInput> =>
-  parseEnrollmentObject(await readJson(path, "enrollment"));
+// Same canonical form the oracles and the extension hash.
+export const canonicalizeEnrollment = (enrollment: Enrollment): string => canonicalize(enrollment)!; // validated enrollments are plain JSON
+
+export const loadEnrollment = async (path: string): Promise<Enrollment> => parseEnrollmentObject(await readJson(path, "enrollment"));
