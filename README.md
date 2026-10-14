@@ -217,9 +217,13 @@ npx webcat manifest verify examples/bundle.json
 npx webcat manifest verify --enrollment enrollment.json --manifest manifest.json
 ```
 
-Sigstore verification applies the same rules as the browser extension: every enrollment
-claim must match the signing certificate (a value starting with `^` is a prefix match),
-and the certificate must have been issued less than `max_age` seconds ago.
+Verification, and all enrollment, manifest and CSP validation, is done by
+[`@freedomofpress/webcat`](https://www.npmjs.com/package/@freedomofpress/webcat), the
+browser extension's own code, so the CLI accepts exactly what browsers accept. Failures
+are reported with the extension's error codes (`ERR_WEBCAT_...`), for example an expired
+manifest is `ERR_WEBCAT_MANIFEST_EXPIRED`. A successful verification prints the time until
+which the manifest stays valid. Note that `examples/` predates the `logs` field and its
+timestamp has expired, so verifying it fails, as it would in the browser.
 
 ### Sigstore signing
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { Command, CommanderError, Option } from "commander";
-import { canonicalize } from "./canonicalize.js";
-import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment.js";
+import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
+import { verifySigstoreManifest, verifySigsumManifest } from "@freedomofpress/webcat/webcat/validators";
+import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
 import { publishSigsumProofToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
+  asLibraryManifest,
   buildManifest,
   canonicalizeManifestBody,
   loadManifestConfig,
@@ -26,7 +28,7 @@ import {
   fetchServedEnrollment,
   submitObservation,
 } from "./chain.js";
-import { fetchTimestampFromPolicy, signManifestWithSigsum, sigsumEnrollmentFromPolicy, verifySigsumManifest } from "./sigsum.js";
+import { fetchTimestampFromPolicy, signManifestWithSigsum, sigsumEnrollmentFromPolicy } from "./sigsum.js";
 import {
   DEFAULT_FULCIO_URL,
   DEFAULT_REKOR_URL,
@@ -41,9 +43,23 @@ import {
   fetchInteractiveOidcToken,
   signManifestWithSigstore,
   staticIdentityProvider,
-  verifySigstoreManifest,
 } from "./sigstore.js";
-import { CliError, OID_RE, ensureObject, external, hashPolicyBytes, invalid, log, readJson, readText, sha256, toBase64Url, writeOutput } from "./utils.js";
+import {
+  CliError,
+  OID_RE,
+  describeWebcatError,
+  ensureObject,
+  external,
+  hashPolicyBytes,
+  invalid,
+  log,
+  readJson,
+  readText,
+  sha256,
+  toBase64Url,
+  withConsoleOnStderr,
+  writeOutput,
+} from "./utils.js";
 import pkg from "../package.json" with { type: "json" };
 
 const collect = (value: string, previous: string[] = []): string[] => previous.concat(value);
@@ -111,7 +127,7 @@ for (const [flag, oid] of SIGSTORE_CLAIM_FLAGS) {
   enrollmentCreate.addOption(new Option(`--${flag} <value>`, `Sigstore claim OID ${oid}`).hideHelp());
 }
 enrollmentCreate.action(async (options) => {
-  let enrollmentObject: EnrollmentInput;
+  let enrollmentObject: Enrollment;
   if (options.type === "sigsum") {
     const policyText = await readText(requireOption(options.policyFile, "--policy-file", "sigsum enrollments"), "policy");
     enrollmentObject = buildEnrollmentObject({
@@ -165,7 +181,7 @@ enrollment
   .option("-o, --output <path>", "Write canonical JSON to a file")
   .action(async (options) => {
     const input = requireOption(options.input ?? options.enrollment, "--input", "enrollment canonicalize");
-    await writeOutput(options.output, canonicalize(await loadEnrollment(input)));
+    await writeOutput(options.output, canonicalizeEnrollment(await loadEnrollment(input)));
   });
 
 enrollment
@@ -173,7 +189,7 @@ enrollment
   .description("Canonicalize and hash an enrollment file")
   .requiredOption("-i, --input <path>", "Enrollment file to hash")
   .action(async (options) => {
-    const canonical = canonicalize(await loadEnrollment(options.input));
+    const canonical = canonicalizeEnrollment(await loadEnrollment(options.input));
     process.stdout.write(toBase64Url(sha256(canonical)) + "\n");
   });
 
@@ -391,28 +407,24 @@ manifest
       ? { enrollment: await loadEnrollment(enrollmentPath), manifest: await loadManifestDocument(manifestPath) }
       : await loadBundleDocument(bundlePath!);
 
-    let passed: boolean;
-    if (enrollment.type === "sigsum") {
-      const results = await verifySigsumManifest(enrollment, document);
-      for (const { signer, ok, message } of results) {
-        process.stdout.write(`Signer ${signer}: ${ok ? "OK" : "FAIL"}${message ? ` (${message})` : ""}\n`);
-      }
-      const verified = results.filter((r) => r.ok).length;
-      passed = verified >= enrollment.threshold;
-      process.stdout.write(`${passed ? "VERIFIED" : "FAILED"}: ${verified}/${enrollment.threshold} required signatures verified\n`);
-      process.stdout.write(`Enrollment policy hash: ${hashPolicyBytes(enrollment.policy)}\n`);
-    } else {
-      const results = await verifySigstoreManifest(enrollment, document);
-      for (const { index, ok, message } of results) {
-        process.stdout.write(`Bundle ${index}: ${ok ? "OK" : "FAIL"}${message ? ` (${message})` : ""}\n`);
-      }
-      passed = results.some((r) => r.ok);
-      process.stdout.write(
-        `${passed ? "VERIFIED" : "FAILED"}: ${results.filter((r) => r.ok).length}/${results.length} sigstore bundle(s) satisfy the enrollment claims\n`,
-      );
+    const sigsum = enrollment.type === EnrollmentTypes.Sigsum;
+    const signatures = document.signatures ?? (sigsum ? {} : []);
+    if (Array.isArray(signatures) === sigsum) {
+      throw invalid(`manifest.signatures contains ${sigsum ? "Sigstore bundles" : "sigsum proofs"} but enrollment.type is ${enrollment.type}`);
     }
-    if (!passed) {
+    // The extension's own verifiers decide; the CLI just reports their verdict.
+    const manifest = asLibraryManifest(document.manifest);
+    const result = sigsum
+      ? await verifySigsumManifest(enrollment, manifest, signatures as Record<string, string>)
+      : await withConsoleOnStderr(() => verifySigstoreManifest(enrollment, manifest, signatures as any[]));
+    if (sigsum) {
+      process.stdout.write(`Enrollment policy hash: ${hashPolicyBytes(enrollment.policy)}\n`);
+    }
+    if (result instanceof WebcatError) {
+      process.stdout.write(`FAILED: ${describeWebcatError(result)}\n`);
       process.exitCode = 1;
+    } else {
+      process.stdout.write(`VERIFIED: valid until ${new Date(result * 1000).toISOString()}\n`);
     }
   });
 

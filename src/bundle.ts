@@ -1,9 +1,9 @@
-import { EnrollmentInput, parseEnrollmentObject } from "./enrollment.js";
+import { type Enrollment, parseEnrollmentObject } from "./enrollment.js";
 import { ManifestDocument, parseManifestDocumentObject } from "./manifest.js";
 import { ensureObject, invalid, readJson } from "./utils.js";
 
 export interface BundleDocument {
-  enrollment: EnrollmentInput;
+  enrollment: Enrollment;
   manifest: ManifestDocument;
 }
 
