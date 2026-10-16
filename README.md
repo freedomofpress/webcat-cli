@@ -149,6 +149,12 @@ By default, these binaries will be available in `$HOME/go/bin`.
 
 ## Getting started
 
+`init` offers two built-in Sigsum policies: `test` (the Sigsum test logs, no rate limiting)
+and `production` (`sigsum-generic-2025-1`, logs and witnesses vetted by the Sigsum project).
+Production logs rate-limit submissions per domain: `init` generates `keys/token` and prints
+the `_sigsum_v1.<domain>` TXT record to publish, and the `manifest sign` flags that use it
+(`--token-signing-key keys/token --token-domain <domain>`).
+
 `init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
 or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
 `.well-known/webcat/enrollment.json`, and prints the next steps. Every answer is also a flag,
