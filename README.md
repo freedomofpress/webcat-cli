@@ -21,10 +21,14 @@ See the following examples and porting guides (outdated):
 
 At the end, you should have compiled a `webcat.config.json` base file for your use case.
 
-Quick yes-or-no check of a candidate policy, with the extension's own validator:
+Quick yes-or-no check of a candidate policy, with the extension's own validator, and a
+hinter that explains each incompatibility with the documented workaround and proposes the
+nearest policy that passes. It accepts a policy string or a page URL to read the policy from:
 
 ```sh
 npx webcat csp check "default-src 'none'; script-src 'self'; style-src 'self'"
+npx webcat csp hint "default-src 'self'; script-src 'self' https://cdn.example 'unsafe-inline'"
+npx webcat csp hint https://example.org/
 ```
 
 ## Decide and prepare enrollment information

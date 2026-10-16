@@ -15,6 +15,7 @@ import {
 } from "./manifest.js";
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
 import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
+import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
 import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
@@ -142,9 +143,9 @@ program
 // ---------------------------------------------------------------------------
 // csp
 
-program
-  .command("csp")
-  .description("Content Security Policy helpers")
+const csp = program.command("csp").description("Content Security Policy helpers");
+
+csp
   .command("check")
   .description("Answer whether a policy satisfies WEBCAT's CSP rules (exit 1 if not)")
   .argument("<policy>", "The policy string, quoted")
@@ -153,7 +154,31 @@ program
       validateCSP(policy);
       process.stdout.write("OK: WEBCAT-compatible\n");
     } catch (err) {
-      process.stdout.write(`NOT OK: ${causeOf(err)}\n`);
+      process.stdout.write(`NOT OK: ${causeOf(err)}\n  run: webcat csp hint '<policy>' for what to change\n`);
+      process.exitCode = 1;
+    }
+  });
+
+csp
+  .command("hint")
+  .description("Explain what WEBCAT would reject in a policy, with the documented workaround for each, and suggest the nearest compatible policy")
+  .argument("<policy-or-url>", "A policy string, or an https:// page to read the policy from")
+  .action(async (input: string) => {
+    let policy = input;
+    if (/^https?:\/\//.test(input)) {
+      const site = await fetchSiteCsp(input);
+      if (!site.csp) {
+        process.stdout.write(`${input} sends no Content-Security-Policy. Start from a preset: webcat init picks one, or run: webcat csp hint "${CSP_PRESETS.static.csp}"\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(`Read from ${site.from}\n`);
+      policy = site.csp;
+    }
+    process.stdout.write(`Policy: ${policy}\n\n`);
+    const report = hintCsp(policy);
+    process.stdout.write(formatCspReport(report));
+    if (report.groups.length) {
       process.exitCode = 1;
     }
   });
