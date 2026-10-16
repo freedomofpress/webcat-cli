@@ -2,10 +2,13 @@
   "type": "sigsum",
   "policy": "AAECBEZEryq9QPSJWgA7yjUPnVkSqzAaScd_E-W22QXCCl_mHCX4pExjVFfi45HR77yn1MKVGgrvBiJaiB5GuYlirGwoySpaOgVNMXyG_C7ranqyBU1iFxANC-Z97Vt0MjxYBkBBAYE",
   "signers": [
-    "KpPZOuuFSyKRA-6fmJAGj_Wn1snx2iwYiPMT240IJm0",
-    "9ubo43Qu5junXkFPgIisdluavdyZ48VozTzS_M0KG0A"
+    "RvdCvSXuH6K--XU3c0oUJkzifHymfW9nulUKWyBcnK4",
+    "30TZo49zUzM974lMNLZklliyoF8PyE0l9XWlHRc8cZs"
   ],
   "threshold": 2,
-  "max_age": 2629746,
-  "cas_url": "https://cas.example.com"
+  "max_age": 31449600,
+  "cas_url": "https://ruin.ist/cas/",
+  "logs": {
+    "RkSvKr1A9IlaADvKNQ-dWRKrMBpJx38T5bbZBcIKX-Y": "https://test.sigsum.org/barreleye"
+  }
 }
