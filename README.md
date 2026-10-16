@@ -21,6 +21,12 @@ See the following examples and porting guides (outdated):
 
 At the end, you should have compiled a `webcat.config.json` base file for your use case.
 
+Quick yes-or-no check of a candidate policy, with the extension's own validator:
+
+```sh
+npx webcat csp check "default-src 'none'; script-src 'self'; style-src 'self'"
+```
+
 ## Decide and prepare enrollment information
 
 A WEBCAT manifest describes a web application by listing its files, cryptographic hashes, CSP policies, and additional metadata useful for auditability. But how is this information verified?
@@ -154,6 +160,15 @@ and `production` (`sigsum-generic-2025-1`, logs and witnesses vetted by the Sigs
 Production logs rate-limit submissions per domain: `init` generates `keys/token` and prints
 the `_sigsum_v1.<domain>` TXT record to publish, and the `manifest sign` flags that use it
 (`--token-signing-key keys/token --token-domain <domain>`).
+
+### Content-addressable storage (`cas_url`)
+
+A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes three objects under `./cas/`,
+named by their SHA-256: the raw Sigsum leaf, the checksum payload, and the canonical manifest.
+Monitors walk from a log entry back to the manifest through them, so the site must serve the
+`cas/` directory at `cas_url` as static files (any https URL you control works, for example
+`https://example.org/cas/`). With `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
+`WEBCAT_CAS_S3_TOKEN` set, `manifest sign` also uploads them to an S3-compatible bucket.
 
 `init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
 or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
