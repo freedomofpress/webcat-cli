@@ -3,12 +3,13 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
 import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
 import { loadBundleDocument } from "../src/bundle";
-import { parseListLeaves, solvePow, toFqdn } from "../src/chain";
-import { writeCasObject } from "../src/cas";
+import { SIGSUM_TEST_POLICY } from "../src/init";
+import { sigsumEnrollmentFromPolicy } from "../src/sigsum";
+import { parseListLeaves, solvePow, toFqdn, verifyList } from "../src/chain";
 import {
+  buildManifest,
   loadManifestConfig,
   loadManifestDocument,
   parseManifestDocumentObject,
@@ -16,23 +17,12 @@ import {
 } from "../src/manifest";
 import {
   decodeKeyMaterial,
-  ensureAbsolutePath,
-  ensureNonEmptyString,
-  ensureRecordOfStrings,
   hexToBase64Url,
   parseInteger,
   toBase64Url,
   validateCasUrl,
   validateMaxAge,
 } from "../src/utils";
-
-describe("canonical JSON", () => {
-  it("sorts keys, escapes only quotes and backslashes, rejects floats", async () => {
-    const { canonicalize } = await import("../src/canonicalize");
-    expect(canonicalize({ b: [1, true, null, "q\"\\\n"], a: { z: "", y: 0 } })).toBe('{"a":{"y":0,"z":""},"b":[1,true,null,"q\\"\\\\\n"]}');
-    expect(() => canonicalize({ x: 1.5 })).toThrow(TypeError);
-  });
-});
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -90,18 +80,21 @@ describe("integer and range validation", () => {
   });
 });
 
+const real = await sigsumEnrollmentFromPolicy(SIGSUM_TEST_POLICY); // a genuine compiled policy plus its logs map
+
 describe("enrollment helpers", () => {
   const baseSigner = "aa".repeat(32);
   const secondSigner = "bb".repeat(32);
 
-  it("builds normalized enrollment objects", () => {
-    const enrollment = buildEnrollmentObject({
+  it("builds normalized enrollment objects", async () => {
+    const enrollment = await buildEnrollmentObject({
       type: "sigsum",
-      policy: "policy-bytes",
+      policy: real.policy,
       signers: [baseSigner],
       threshold: 1,
       maxAge: 1_000_000,
       casUrl: "https://example.com",
+      logs: real.logs,
     });
 
     expect(enrollment.type).toBe("sigsum");
@@ -113,66 +106,71 @@ describe("enrollment helpers", () => {
     expect(enrollment.max_age).toBe(1_000_000);
   });
 
-  it("rejects duplicate or insufficient signer information", () => {
-    expect(() =>
+  it("rejects duplicate or insufficient signer information", async () => {
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [],
         threshold: 1,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: real.logs,
       }),
-    ).toThrow("enrollment.signers must contain at least one signer");
+    ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner, baseSigner],
         threshold: 1,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: real.logs,
       }),
-    ).toThrow("enrollment.signers must not contain duplicates");
+    ).rejects.toThrow("enrollment.signers must not contain duplicates");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner, secondSigner],
         threshold: 3,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: real.logs,
       }),
-    ).toThrow("enrollment.threshold must be between 1 and the number of signers");
+    ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner],
         threshold: 0,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
+        logs: real.logs,
       }),
-    ).toThrow("enrollment.threshold must be between 1 and the number of signers");
+    ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner],
         threshold: 1,
         maxAge: 60 * 60 * 24 * 8,
         casUrl: "http://example.com",
+        logs: real.logs,
       }),
-    ).toThrow("enrollment.cas_url must use https://");
+    ).rejects.toThrow("enrollment.cas_url must use https://");
   });
 
-  it("builds sigstore enrollment objects", () => {
+  it("builds sigstore enrollment objects", async () => {
     const trustedRoot = { fulcio: { root: "data" } };
-    const enrollment = buildEnrollmentObject({
+    const enrollment = await buildEnrollmentObject({
       type: "sigstore",
       trustedRoot,
       claims: {
@@ -200,11 +198,12 @@ describe("enrollment helpers", () => {
       file,
       JSON.stringify({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [hexToBase64Url(baseSigner)],
         threshold: 1,
         max_age: 1_000_000,
         cas_url: "https://example.com",
+        logs: real.logs,
       }),
     );
 
@@ -230,18 +229,20 @@ describe("enrollment helpers", () => {
         threshold: 1,
         max_age: 1,
         cas_url: "https://example.com",
+        logs: real.logs,
       }),
-    ).toThrow("enrollment.policy must be a base64url string");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_POLICY_LENGTH");
 
     expect(() =>
       parseEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
-        signers: ["a", "a"],
+        policy: real.policy,
+        signers: [hexToBase64Url(baseSigner), hexToBase64Url(baseSigner)],
         threshold: 1,
-        max_age: 1,
+        max_age: 1_000_000,
         cas_url: "https://example.com",
-      }),
+        logs: real.logs,
+      }, { authoring: true }),
     ).toThrow("enrollment.signers must not contain duplicates");
 
     expect(() =>
@@ -251,7 +252,17 @@ describe("enrollment helpers", () => {
         claims: { "2.5.29.17": "id" },
         max_age: 1_000_000,
       }),
-    ).toThrow("enrollment.trusted_root must be an object");
+    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_TRUSTED_ROOT_MISSING");
+
+    const base = { type: "sigsum", policy: real.policy, signers: [hexToBase64Url(baseSigner)], threshold: 1, max_age: 1_000_000, cas_url: "https://example.com" };
+    const authoring = { authoring: true };
+    expect(() => parseEnrollmentObject({ ...base, logs: { ...real.logs, AAAA: "https://other.example" } }, authoring)).toThrow("enrollment.logs lists AAAA, which is not a log in the policy");
+    expect(() => parseEnrollmentObject({ ...base, logs: { AAAA: "https://other.example" } }, authoring)).toThrow(/enrollment.logs must give the URL of log \S+, which the policy trusts/);
+    expect(() => parseEnrollmentObject({ ...base, policy: "bm90LWEtcG9saWN5", logs: real.logs }, authoring)).toThrow("enrollment.policy must be a compiled Sigsum policy");
+    expect(() => parseEnrollmentObject({ ...base, logs: real.logs }, authoring)).not.toThrow();
+    // Read from disk or the network, only the browser's rules apply: a two-year max_age or a stray log entry still parses.
+    expect(() => parseEnrollmentObject({ ...base, max_age: 2 * 365 * 86_400, logs: { ...real.logs, AAAA: "https://other.example" } })).not.toThrow();
+    expect(() => parseEnrollmentObject({ ...base, type: undefined, logs: real.logs })).toThrow("enrollment.type must be 'sigsum' or 'sigstore'");
 
     expect(() =>
       parseEnrollmentObject({
@@ -259,57 +270,26 @@ describe("enrollment helpers", () => {
         trusted_root: {},
         claims: { not_oid: "id" },
         max_age: 1_000_000,
-      }),
+      }, { authoring: true }),
     ).toThrow("enrollment.claims keys must be OIDs");
   });
 });
 
-describe("string and path validation", () => {
-  it("ensures non-empty strings", () => {
-    expect(() => ensureNonEmptyString("", "field")).toThrow("field must be a non-empty string");
-    expect(ensureNonEmptyString(" value ", "field")).toBe("value");
-  });
-
-  it("ensures absolute paths", () => {
-    expect(() => ensureAbsolutePath("relative", "p")).toThrow("p must start with '/'");
-    expect(ensureAbsolutePath("/absolute", "p")).toBe("/absolute");
-  });
-
-  it("ensures records of strings", () => {
-    expect(() => ensureRecordOfStrings([], "record")).toThrow("record must be an object");
-    expect(() => ensureRecordOfStrings({ key: "" }, "record")).toThrow(
-      "record entries must be non-empty strings",
-    );
-    expect(ensureRecordOfStrings({ a: "x" }, "record")).toEqual({ a: "x" });
-  });
-});
-
 describe("CAS resolution", () => {
-  it("resolves from leaf checksum to manifest via CAS", async () => {
+  it("lets an auditor walk from a log entry's checksum to the manifest", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
     const cwd = process.cwd();
     process.chdir(dir);
     try {
-      const canonicalManifest = JSON.stringify({ manifest: { app: "demo" }, signatures: {} });
-      const messageHash = createHash("sha256").update(canonicalManifest).digest();
-      const checksum = new Hash(createHash("sha256").update(messageHash).digest());
-      const signature = new Signature(new Uint8Array(64));
-      const keyHash = new KeyHash(new Uint8Array(32));
-      const leafBytes = new Leaf(checksum, signature, keyHash).toBytes();
-
-      const { hash: leafHash } = await writeCasObject(leafBytes);
-      await writeCasObject(messageHash);
-      await writeCasObject(canonicalManifest);
-
-      const storedLeaf = await readFile(path.join(dir, "cas", leafHash));
-      const storedChecksum = storedLeaf.subarray(1, 33);
-      const checksumHex = Buffer.from(storedChecksum).toString("hex");
-
-      const storedMessageHash = await readFile(path.join(dir, "cas", checksumHex));
-      const messageHashHex = Buffer.from(storedMessageHash).toString("hex");
-
-      const storedManifest = await readFile(path.join(dir, "cas", messageHashHex), "utf8");
-      expect(storedManifest).toBe(canonicalManifest);
+      const canonicalManifest = JSON.stringify({ app: "demo" });
+      const { publishManifestToCas } = await import("../src/cas");
+      await publishManifestToCas(canonicalManifest);
+      // The Sigsum leaf checksum is sha256(message) where message = sha256(manifest); both are CAS object names.
+      const message = createHash("sha256").update(canonicalManifest).digest();
+      const leafChecksumHex = createHash("sha256").update(message).digest("hex");
+      const storedMessage = await readFile(path.join(dir, "cas", leafChecksumHex));
+      expect(storedMessage.equals(message)).toBe(true);
+      expect(await readFile(path.join(dir, "cas", storedMessage.toString("hex")), "utf8")).toBe(canonicalManifest);
     } finally {
       process.chdir(cwd);
       await rm(dir, { recursive: true, force: true });
@@ -343,22 +323,20 @@ describe("manifest configuration", () => {
       "manifest config file",
     );
 
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        app: "https://example.com",
-        version: "1.0.0",
-        default_csp: "csp",
-        default_index: "index.html",
-        default_fallback: "relative.html",
-      }),
-    );
-
-    await expect(loadManifestConfig(configPath)).rejects.toThrow(
-      "config.default_fallback must start with '/'",
-    );
-
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("builds manifests with the extension's rules", () => {
+    const hash = toBase64Url(createHash("sha256").update("x").digest());
+    const scan = { files: new Map([["/index.html", hash]]), wasm: new Set<string>() };
+    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
+    expect(buildManifest(config, scan).files).toEqual({ "/index.html": hash });
+    expect(() => buildManifest({ ...config, default_fallback: "/missing.html" }, scan)).toThrow("config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE");
+    expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
+    expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
+    expect(() => buildManifest({ ...config, default_fallback: "/missing.html", default_csp: "default-src 'self'", extra_csp: { "/a": "csp" } }, scan)).toThrow(
+      /3 problems:\n  - config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE\n  - config.default_csp must be .*\n  - config.extra_csp\['\/a'\] must be/,
+    );
   });
 });
 
@@ -409,24 +387,28 @@ describe("manifest parsing", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
     const manifestPath = path.join(dir, "manifest.json");
 
+    const hash = toBase64Url(createHash("sha256").update("x").digest());
     const manifest = {
       manifest: {
-        files: {},
+        files: { "/index.html": hash },
         wasm: [],
         extra_csp: {},
         timestamp: "2024-01-01T00:00:00Z",
         app: "app",
         version: "1",
-        default_csp: "csp",
+        default_csp: "default-src 'none'",
         default_index: "index.html",
-        default_fallback: "/error.html",
+        default_fallback: "/index.html",
       },
       signatures: {},
     };
 
     await writeFile(manifestPath, JSON.stringify(manifest));
     const loaded = await loadManifestDocument(manifestPath);
-    expect(Object.keys(loaded.manifest.files)).toHaveLength(0);
+    expect(loaded.manifest.files).toEqual({ "/index.html": hash });
+
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, manifest: { ...manifest.manifest, files: { "/index.html": "nothash" } } }));
+    await expect(loadManifestDocument(manifestPath)).rejects.toThrow("manifest.manifest: ERR_WEBCAT_MANIFEST_FILES_MALFORMED (/index.html)");
 
     await writeFile(manifestPath, "{]");
     await expect(loadManifestDocument(manifestPath)).rejects.toThrow(
@@ -450,7 +432,8 @@ describe("policy and bundle parsing", () => {
       bundlePath,
       JSON.stringify({
         enrollment: {
-          policy: "policy",
+          type: "sigsum",
+          policy: real.policy,
           signers: [""],
           threshold: 1,
           max_age: 1_000_000,
@@ -471,9 +454,7 @@ describe("policy and bundle parsing", () => {
       }),
     );
 
-    await expect(loadBundleDocument(bundlePath)).rejects.toThrow(
-      "enrollment.signers entries must be non-empty strings",
-    );
+    await expect(loadBundleDocument(bundlePath)).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_LOGS_MALFORMED");
 
     await writeFile(bundlePath, "{}");
     await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle.enrollment is required");
@@ -482,7 +463,8 @@ describe("policy and bundle parsing", () => {
       bundlePath,
       JSON.stringify({
         enrollment: {
-          policy: "policy",
+          type: "sigsum",
+          policy: real.policy,
           signers: ["abc"],
           threshold: 1,
           max_age: 1_000_000,
@@ -498,6 +480,104 @@ describe("policy and bundle parsing", () => {
   });
 });
 
+describe("csp hints", () => {
+  it("explains each incompatibility and proposes a policy that validates", async () => {
+    const { hintCsp } = await import("../src/csp");
+    const { validateCSP } = await import("@freedomofpress/webcat/webcat/validators");
+    const { groups, suggested, accepted } = hintCsp("default-src 'self'; script-src 'self' https://cdn.example 'unsafe-inline' 'nonce-x'; style-src 'self' https://fonts.example; img-src *");
+    expect(groups.map((g) => [g.title, g.items])).toEqual([
+      ["Scripts from other origins", ["script-src https://cdn.example"]],
+      ["Inline and dynamic scripts", ["script-src 'unsafe-inline'", "script-src 'nonce-x'"]],
+      ["Stylesheets from other origins", ["style-src https://fonts.example"]],
+      ["Missing directives", ["object-src", "worker-src"]],
+    ]);
+    expect(groups[0].advice.join(" ")).toContain("sandboxed iframe");
+    expect(groups[1].advice.join(" ")).toContain("manifest signature");
+    expect(accepted.join(" ")).toContain("img-src");
+    expect(() => validateCSP(suggested)).not.toThrow();
+    expect(suggested).toContain("img-src *");
+    expect(hintCsp("default-src 'none'; script-src 'self'; style-src 'self'").groups).toEqual([]);
+    expect(hintCsp("default-src 'none', default-src 'self'").groups[0].title).toBe("Multiple policies");
+  });
+});
+
+describe("openssh public keys", () => {
+  it("extracts the raw ed25519 key from an OpenSSH public key line", async () => {
+    const { signerFromOpenSsh } = await import("../src/enrollment");
+    expect(signerFromOpenSsh("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKTjWh18iv9sSOg18yWXS1IepFJclk9Aq5XRRfPL2Iq0 hw-sim")).toBe(hexToBase64Url("a4e35a1d7c8aff6c48e835f325974b521ea4525c964f40ab95d145f3cbd88ab4"));
+    expect(() => signerFromOpenSsh("ssh-rsa AAAA")).toThrow("expected an OpenSSH ed25519 public key line");
+  });
+});
+
+describe("init", () => {
+  it("writes a config, a policy and a valid enrollment from flags alone", async () => {
+    const { runInit, CSP_PRESETS } = await import("../src/init");
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-"));
+    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)], casUrl: "https://example.org/cas/" });
+    const config = JSON.parse(await readFile(path.join(dir, "webcat.config.json"), "utf8"));
+    expect(config.app).toBe("https://example.org");
+    expect(config.default_csp).toBe(CSP_PRESETS.static.csp);
+    const enrollment = await loadEnrollment(path.join(dir, ".well-known/webcat/enrollment.json"));
+    expect(enrollment.type).toBe("sigsum");
+    expect(await readFile(path.join(dir, "trust_policy"), "utf8")).toContain("quorum");
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("trusted root drift", () => {
+  it("reports new entries and newly ended ones", async () => {
+    const { trustedRootDrift } = await import("../src/sigstore");
+    const ca = (leaf: string, uri: string, validFor: any) => ({ uri, certChain: { certificates: [{ rawBytes: leaf }] }, validFor });
+    const tlog = (key: string, baseUrl: string, validFor: any) => ({ baseUrl, publicKey: { rawBytes: key, validFor } });
+    const pinned = { certificateAuthorities: [ca("A", "https://fulcio", { start: "2022" })], tlogs: [tlog("K1", "https://rekor", { start: "2021" })] };
+    const community = {
+      certificateAuthorities: [ca("A", "https://fulcio", { start: "2022", end: "2027-01-01" }), ca("B", "https://fulcio", { start: "2026" })],
+      tlogs: [tlog("K1", "https://rekor", { start: "2021" }), tlog("K2", "https://log2026-1", { start: "2026" })],
+      timestampAuthorities: [ca("T", "https://tsa", { start: "2025" })],
+    };
+    expect(trustedRootDrift(pinned, pinned)).toEqual([]);
+    const { signingBlockedBy } = await import("../src/sigstore");
+    expect(signingBlockedBy(pinned, community, { now: new Date("2026-06-01") })).toEqual([]); // CA A still active: additions only
+    expect(signingBlockedBy(pinned, community, { now: new Date("2027-06-01") })).toEqual(["no currently valid certificate authority in the community root is in the enrollment's trusted root"]);
+    expect(trustedRootDrift(pinned, community, new Date("2030-01-01"))).not.toContain("new certificate authority https://fulcio (valid from 2022) is not in the enrollment's trusted root");
+    expect(trustedRootDrift(pinned, community)).toEqual([
+      "certificate authority https://fulcio ends on 2027-01-01 in the community root",
+      "new certificate authority https://fulcio (valid from 2026) is not in the enrollment's trusted root",
+      "new transparency log https://log2026-1 (valid from 2026) is not in the enrollment's trusted root",
+      "new timestamp authority https://tsa (valid from 2025) is not in the enrollment's trusted root",
+    ]);
+  });
+});
+
+describe("validity", () => {
+  it("warns when a manifest expires within 30 days", async () => {
+    const { describeValidity } = await import("../src/bundle");
+    const now = Math.floor(Date.now() / 1000);
+    expect(describeValidity(now + 100 * 86_400)).toMatch(/^valid until .*, (99|100) days left$/);
+    expect(describeValidity(now + 5 * 86_400)).toMatch(/, (4|5) days left, WARNING: re-sign/);
+  });
+});
+
+describe("site checks", () => {
+  it("picks the CSP and file hash the extension would for a path", async () => {
+    const { checkHeaders, expectedCsp, expectedHash } = await import("../src/site");
+    const manifest = {
+      app: "a", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/404.html",
+      files: { "/index.html": "A", "/404.html": "B", "/app/main.js": "C" }, wasm: [],
+      extra_csp: { "/app/": "default-src 'none'; script-src 'self'", "/app/main.js": "default-src 'none'; script-src 'wasm-unsafe-eval'" },
+    };
+    expect(expectedCsp(manifest, "/")).toBe("default-src 'none'");
+    expect(expectedCsp(manifest, "/app/other.js")).toBe("default-src 'none'; script-src 'self'");
+    expect(expectedCsp(manifest, "/app/main.js")).toBe("default-src 'none'; script-src 'wasm-unsafe-eval'");
+    expect(expectedHash(manifest, "/", true)).toBe("A");
+    expect(expectedHash(manifest, "/missing.html", true)).toBe("B");
+    expect(expectedHash(manifest, "/missing.js", false)).toBeUndefined();
+    const problems = checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src *", refresh: "0", "origin-agent-cluster": "?0" }));
+    expect(problems).toHaveLength(4);
+    expect(checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src 'none'" }))).toEqual([]);
+  });
+});
+
 describe("enrollment chain client", () => {
   it("solves proof of work challenges", () => {
     const challenge = "ca8dc16136a1df96d1c258bafbb23b096f7e1c28d22da0237dccd05d3c739f0e";
@@ -507,13 +587,25 @@ describe("enrollment chain client", () => {
     expect(digest[1] >> 4).toBe(0);
   });
 
+  it("verifies a recorded list.json against its block like the extension, and rejects tampering", async () => {
+    const list = JSON.parse(await readFile(path.join(__dirname, "fixtures/list.json"), "utf8"));
+    const block = JSON.parse(await readFile(path.join(__dirname, "fixtures/block.json"), "utf8"));
+    const verified = await verifyList(list, block);
+    expect(verified.blockHeight).toBe(Number(block.signed_header.header.height)); // the verified block, one past the list's snapshot
+    expect(verified.leaves.get("lsd.cat")).toMatch(/^[0-9a-f]{64}$/);
+    const tampered = { ...list, leaves: list.leaves.map((l: string[], i: number) => (i === 0 ? [l[0], "0a20" + "ab".repeat(32)] : l)) };
+    await expect(verifyList(tampered, block)).rejects.toThrow("leaves do not prove into the block's app hash");
+    await expect(verifyList({ ...list, proof: { ...list.proof, app_hash: "00".repeat(32) } }, block)).rejects.toThrow("app hash does not match");
+    const otherChain = JSON.parse(JSON.stringify(block)); otherChain.signed_header.header.chain_id = "other-chain";
+    await expect(verifyList(list, otherChain)).rejects.toThrow("Chain ID mismatch");
+    const badSig = JSON.parse(JSON.stringify(block)); badSig.signed_header.commit.signatures[0].signature = Buffer.alloc(64).toString("base64");
+    await expect(verifyList(list, badSig)).rejects.toThrow("not signed by a quorum");
+  });
+
   it("decodes list.json leaves into domain -> hash", () => {
-    const entries = parseListLeaves({
-      block_height: 1,
-      leaves: [["canonical/.cat.lsd", "0a20" + "ab".repeat(32)], ["canonical/.org.endeixis.www", "0a20" + "cd".repeat(32)]],
-    });
-    expect(entries.get("lsd.cat.")).toBe("ab".repeat(32));
-    expect(entries.get("www.endeixis.org.")).toBe("cd".repeat(32));
+    const entries = parseListLeaves([["canonical/.cat.lsd", "0a20" + "ab".repeat(32)], ["canonical/.org.endeixis.www", "0a20" + "cd".repeat(32)]]);
+    expect(entries.get("lsd.cat")).toBe("ab".repeat(32));
+    expect(entries.get("www.endeixis.org")).toBe("cd".repeat(32));
     expect(toFqdn("Example.COM")).toBe("example.com.");
   });
 });

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
+import type { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
 
 // Error contract
 // - exit 1: the command ran and the answer is negative (verification failed); set via process.exitCode
@@ -19,6 +20,64 @@ export const invalid = (message: string): CliError => new CliError(message, 2);
 export const external = (message: string): CliError => new CliError(message, 3);
 export const causeOf = (err: unknown): string =>
   err instanceof Error ? (err.cause instanceof Error ? `${err.message}: ${err.cause.message}` : err.message) : String(err);
+
+// Runs every check and reports all invalid-input problems together, instead of one per run.
+// Anything other than an exit-2 error propagates immediately.
+export function validateAll(checks: Array<() => unknown>): void {
+  const problems: string[] = [];
+  for (const run of checks) {
+    try {
+      run();
+    } catch (err) {
+      if (!(err instanceof CliError) || err.exitCode !== 2) {
+        throw err;
+      }
+      problems.push(err.message);
+    }
+  }
+  if (problems.length === 1) {
+    throw invalid(problems[0]);
+  }
+  if (problems.length > 1) {
+    throw invalid(`${problems.length} problems:\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
+// fetch that turns transport errors and non-2xx answers into exit-3 errors naming the URL.
+export async function fetchOk(url: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(url, init).catch((err) => {
+    throw external(`failed to fetch ${url}: ${causeOf(err)}`);
+  });
+  if (!response.ok) {
+    throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
+  }
+  return response;
+}
+export const fetchJson = (url: string, init?: RequestInit): Promise<any> =>
+  fetchOk(url, init).then((r) =>
+    r.json().catch((err) => {
+      throw external(`failed to fetch ${url}: not valid JSON: ${causeOf(err)}`);
+    }),
+  );
+
+// Validation itself comes from @freedomofpress/webcat, the extension's own validators, so the CLI
+// accepts exactly what browsers accept. Its errors carry a code (ERR_WEBCAT_...) plus details.
+export const describeWebcatError = (err: WebcatError): string => (err.details?.length ? `${err.code} (${err.details.join(", ")})` : err.code);
+export function check(err: WebcatError | null, subject: string): void {
+  if (err) {
+    throw invalid(`${subject}: ${describeWebcatError(err)}`);
+  }
+}
+// The library reports per-bundle Sigstore exceptions through console.log; keep stdout pipeable.
+export async function withConsoleOnStderr<T>(fn: () => Promise<T>): Promise<T> {
+  const original = console.log;
+  console.log = (...args: unknown[]) => log(args.map(String).join(" "));
+  try {
+    return await fn();
+  } finally {
+    console.log = original;
+  }
+}
 
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const YEAR_SECONDS = 365 * 24 * 60 * 60;
@@ -97,13 +156,6 @@ export function validateCasUrl(urlString: string, name: string): void {
   }
 }
 
-export function ensureNonEmptyString(value: unknown, name: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw invalid(`${name} must be a non-empty string`);
-  }
-  return value.trim();
-}
-
 export function ensureObject(value: unknown, name: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw invalid(`${name} must be an object`);
@@ -111,31 +163,4 @@ export function ensureObject(value: unknown, name: string): Record<string, unkno
   return value as Record<string, unknown>;
 }
 
-export function ensureAbsolutePath(value: unknown, name: string): string {
-  const normalized = ensureNonEmptyString(value, name);
-  if (!normalized.startsWith("/")) {
-    throw invalid(`${name} must start with '/'`);
-  }
-  return normalized;
-}
-
-export function ensureRecordOfStrings(value: unknown, name: string): Record<string, string> {
-  const record: Record<string, string> = {};
-  for (const [key, raw] of Object.entries(ensureObject(value, name))) {
-    if (typeof raw !== "string" || raw.trim().length === 0) {
-      throw invalid(`${name} entries must be non-empty strings`);
-    }
-    record[key] = raw.trim();
-  }
-  return record;
-}
-
-export function decodePolicyBytes(encoded: string, name: string): Uint8Array {
-  const buffer = Buffer.from(encoded, "base64url");
-  if (buffer.length === 0) {
-    throw invalid(`${name} must be a non-empty base64url compiled policy`);
-  }
-  return new Uint8Array(buffer);
-}
-
-export const hashPolicyBytes = (encodedPolicy: string): string => toBase64Url(sha256(decodePolicyBytes(encodedPolicy, "enrollment.policy")));
+export const hashPolicyBytes = (encodedPolicy: string): string => toBase64Url(sha256(Buffer.from(encodedPolicy, "base64url")));
