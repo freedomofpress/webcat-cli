@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
-import { verifySigstoreManifest, verifySigsumManifest } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
 import { publishSigsumProofToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
-  asLibraryManifest,
   buildManifest,
   canonicalizeManifestBody,
   loadManifestConfig,
@@ -14,7 +12,8 @@ import {
   manifestHash,
   scanDirectory,
 } from "./manifest.js";
-import { loadBundleDocument } from "./bundle.js";
+import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
+import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
   DEFAULT_LIST_URL,
@@ -58,7 +57,6 @@ import {
   sha256,
   toBase64Url,
   validateAll,
-  withConsoleOnStderr,
   writeOutput,
 } from "./utils.js";
 import pkg from "../package.json" with { type: "json" };
@@ -418,28 +416,49 @@ manifest
     if (!bundlePath === !enrollmentPath || !enrollmentPath !== !manifestPath) {
       throw invalid("a bundle argument, or --enrollment together with --manifest, is required for manifest verify");
     }
-    const { enrollment, manifest: document } = enrollmentPath
+    const bundle = enrollmentPath
       ? { enrollment: await loadEnrollment(enrollmentPath), manifest: await loadManifestDocument(manifestPath) }
       : await loadBundleDocument(bundlePath!);
-
-    const sigsum = enrollment.type === EnrollmentTypes.Sigsum;
-    const signatures = document.signatures ?? (sigsum ? {} : []);
-    if (Array.isArray(signatures) === sigsum) {
-      throw invalid(`manifest.signatures contains ${sigsum ? "Sigstore bundles" : "sigsum proofs"} but enrollment.type is ${enrollment.type}`);
-    }
-    // The extension's own verifiers decide; the CLI just reports their verdict.
-    const manifest = asLibraryManifest(document.manifest);
-    const result = sigsum
-      ? await verifySigsumManifest(enrollment, manifest, signatures as Record<string, string>)
-      : await withConsoleOnStderr(() => verifySigstoreManifest(enrollment, manifest, signatures as any[]));
-    if (sigsum) {
-      process.stdout.write(`Enrollment policy hash: ${hashPolicyBytes(enrollment.policy)}\n`);
+    const result = await verifyBundle(bundle);
+    if (bundle.enrollment.type === EnrollmentTypes.Sigsum) {
+      process.stdout.write(`Enrollment policy hash: ${hashPolicyBytes(bundle.enrollment.policy)}\n`);
     }
     if (result instanceof WebcatError) {
       process.stdout.write(`FAILED: ${describeWebcatError(result)}\n`);
       process.exitCode = 1;
     } else {
-      process.stdout.write(`VERIFIED: valid until ${new Date(result * 1000).toISOString()}\n`);
+      process.stdout.write(`VERIFIED: ${describeValidity(result)}\n`);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// site
+
+program
+  .command("site")
+  .description("Check deployed sites")
+  .command("check")
+  .description("Fetch a live site like the extension does: verify its bundle, then check headers, CSP and file hashes for every path")
+  .argument("<domain>", "Domain to check")
+  .option("--path <path>", "Only check this path (repeatable); default: / plus every file in the manifest", collect)
+  .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
+  .action(async (domain: string, options) => {
+    const report = await checkSite(domain, { chainApi: options.chainApi, paths: options.path });
+    process.stdout.write(`Bundle:          ${report.bundle}\n`);
+    process.stdout.write(`Previous bundle: ${report.previousBundle}\n`);
+    process.stdout.write(`Enrollment:      ${report.enrollment}\n`);
+    const failed = report.paths.filter((p) => p.problems.length > 0);
+    process.stdout.write(`Paths:           ${report.paths.length} checked, ${failed.length} with problems\n`);
+    for (const { path, problems } of failed) {
+      process.stdout.write(`  ${path}\n`);
+      for (const problem of problems) {
+        process.stdout.write(`    - ${problem}\n`);
+      }
+    }
+    const broken = failed.length > 0 || !report.bundle.startsWith("VERIFIED") || /MISMATCH|ERROR/.test(report.enrollment);
+    process.stdout.write(broken ? "Status: NOT OK, visitors with the extension will see errors\n" : "Status: OK\n");
+    if (broken) {
+      process.exitCode = 1;
     }
   });
 

@@ -477,6 +477,35 @@ describe("policy and bundle parsing", () => {
   });
 });
 
+describe("validity", () => {
+  it("warns when a manifest expires within 30 days", async () => {
+    const { describeValidity } = await import("../src/bundle");
+    const now = Math.floor(Date.now() / 1000);
+    expect(describeValidity(now + 100 * 86_400)).toMatch(/^valid until .*, (99|100) days left$/);
+    expect(describeValidity(now + 5 * 86_400)).toMatch(/, (4|5) days left, WARNING: re-sign/);
+  });
+});
+
+describe("site checks", () => {
+  it("picks the CSP and file hash the extension would for a path", async () => {
+    const { checkHeaders, expectedCsp, expectedHash } = await import("../src/site");
+    const manifest = {
+      app: "a", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/404.html",
+      files: { "/index.html": "A", "/404.html": "B", "/app/main.js": "C" }, wasm: [],
+      extra_csp: { "/app/": "default-src 'none'; script-src 'self'", "/app/main.js": "default-src 'none'; script-src 'wasm-unsafe-eval'" },
+    };
+    expect(expectedCsp(manifest, "/")).toBe("default-src 'none'");
+    expect(expectedCsp(manifest, "/app/other.js")).toBe("default-src 'none'; script-src 'self'");
+    expect(expectedCsp(manifest, "/app/main.js")).toBe("default-src 'none'; script-src 'wasm-unsafe-eval'");
+    expect(expectedHash(manifest, "/", true)).toBe("A");
+    expect(expectedHash(manifest, "/missing.html", true)).toBe("B");
+    expect(expectedHash(manifest, "/missing.js", false)).toBeUndefined();
+    const problems = checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src *", refresh: "0", "origin-agent-cluster": "?0" }));
+    expect(problems).toHaveLength(4);
+    expect(checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src 'none'" }))).toEqual([]);
+  });
+});
+
 describe("enrollment chain client", () => {
   it("solves proof of work challenges", () => {
     const challenge = "ca8dc16136a1df96d1c258bafbb23b096f7e1c28d22da0237dccd05d3c739f0e";

@@ -270,6 +270,22 @@ npx webcat manifest sign \
   --interactive
 ```
 
+## Site checks
+
+`site check` fetches a deployed site the way the extension does and reports everything a
+visitor's browser would reject: it verifies `bundle.json` (and `bundle-prev.json` if served),
+compares the embedded enrollment with `enrollment.json` and the chain, then requests `/` and
+every file in the manifest and checks the response for exactly one `content-security-policy`
+header equal to the manifest's policy for that path, forbidden headers (`refresh`, `link`,
+`origin-agent-cluster` other than `?1`), redirects, and the content hash.
+
+```sh
+npx webcat site check example.org
+npx webcat site check example.org --path / --path /app/main.js
+```
+
+Exits 1 when the bundle does not verify, the enrollment does not match, or any path has a problem.
+
 ## Exit codes
 
 | Code | Meaning |
