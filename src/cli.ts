@@ -13,7 +13,7 @@ import {
   scanDirectory,
 } from "./manifest.js";
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
-import { CSP_PRESETS, DEFAULT_MAX_AGE, runInit } from "./init.js";
+import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
 import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
@@ -116,6 +116,7 @@ program
   .addOption(typeOption("Enrollment"))
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
   .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
+  .addOption(new Option("--policy <choice>", `Sigsum policy: ${Object.keys(SIGSUM_POLICIES).join(", ")}, or a policy file path`).helpGroup(SIGSUM))
   .addOption(new Option("--signer <key>", "Existing Sigsum signer public key, hex or base64 (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
   .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
@@ -123,10 +124,17 @@ program
   .addOption(new Option("--identity <value>", "Signing identity").helpGroup(SIGSTORE))
   .addOption(new Option("--issuer <url>", "OIDC issuer").helpGroup(SIGSTORE))
   .option("-d, --dir <path>", "Directory to write into", ".")
-  .action(async (options) => {
-    // --type has a default, so leave it unset for the prompt unless given explicitly.
-    const type = program.commands.find((c) => c.name() === "init")!.getOptionValueSource("type") === "cli" ? options.type : undefined;
-    await runInit({ ...options, version: options.appVersion, type, csp: options.csp && (CSP_PRESETS[options.csp]?.csp ?? options.csp) });
+  .action(async (options, command: Command) => {
+    // Flags with defaults are only "answered" when given explicitly; otherwise init asks (and uses the default off a terminal).
+    const explicit = (name: string) => (command.getOptionValueSource(name) === "cli" ? options[name] : undefined);
+    await runInit({
+      ...options,
+      version: options.appVersion,
+      type: explicit("type"),
+      threshold: explicit("threshold"),
+      maxAge: explicit("maxAge"),
+      csp: options.csp && (CSP_PRESETS[options.csp]?.csp ?? options.csp),
+    });
   });
 
 // ---------------------------------------------------------------------------

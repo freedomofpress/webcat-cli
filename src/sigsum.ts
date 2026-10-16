@@ -45,12 +45,19 @@ function runSigsum(binary: string, args: string[], stdio: "pipe" | "inherit"): P
   });
 }
 
+// Text of a policy built into the Sigsum tools (sigsum-policy list), e.g. sigsum-generic-2025-1 for production.
+export const builtinPolicyText = (name: string): Promise<string> => runSigsum("sigsum-policy", ["show", name], "pipe").then((t) => t + "\n");
+
+export async function generateSigsumKey(keyPath: string): Promise<void> {
+  await mkdir(path.dirname(keyPath), { recursive: true });
+  await runSigsum("sigsum-key", ["generate", "-o", keyPath], "pipe");
+}
+
 // Generates keys/key1..keyN with sigsum-key and returns their public keys as enrollment signers.
 export async function generateSigsumKeys(dir: string, count: number): Promise<{ paths: string[]; signers: string[] }> {
-  await mkdir(path.join(dir, "keys"), { recursive: true });
   const paths = Array.from({ length: count }, (_, i) => path.join(dir, "keys", `key${i + 1}`));
   for (const keyPath of paths) {
-    await runSigsum("sigsum-key", ["generate", "-o", keyPath], "pipe");
+    await generateSigsumKey(keyPath);
   }
   return { paths, signers: await Promise.all(paths.map(deriveSignerKeyFromPrivateKey)) };
 }

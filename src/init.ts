@@ -6,9 +6,9 @@ import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject } from "./enrollment.js";
-import { generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
+import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
 import { ISSUER_V2_OID, SAN_OID, fetchCommunityTrustedRoot } from "./sigstore.js";
-import { causeOf, invalid, log, validateAll } from "./utils.js";
+import { causeOf, invalid, log, readText, validateAll } from "./utils.js";
 
 export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
   static: {
@@ -21,7 +21,13 @@ export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
   },
 };
 
-// ponytail: snapshot of the Sigsum test policy from the WEBCAT docs; replace with a fetched canonical policy once one is published.
+// Policies built into the Sigsum tools. Production logs rate-limit by domain, so signing needs a DNS token key.
+export const SIGSUM_POLICIES: Record<string, { name: string; title: string; rateLimited: boolean }> = {
+  test: { name: "sigsum-test-2025-3", title: "Sigsum test logs, no rate limiting, for trying things out", rateLimited: false },
+  production: { name: "sigsum-generic-2025-1", title: "Sigsum production logs vetted by the Sigsum project (2-of-3 witnesses), rate-limited per domain", rateLimited: true },
+};
+
+// ponytail: offline copy of the test policy for when sigsum-policy is not installed; production always comes from the tool.
 export const SIGSUM_TEST_POLICY = `log 4644af2abd40f4895a003bca350f9d5912ab301a49c77f13e5b6d905c20a5fe6 https://test.sigsum.org/barreleye
 witness poc.sigsum.org/nisse 1c25f8a44c635457e2e391d1efbca7d4c2951a0aef06225a881e46b98962ac6c
 witness rgdd.se/poc-witness  28c92a5a3a054d317c86fc2eeb6a7ab2054d6217100d0be67ded5b74323c5806
@@ -38,6 +44,7 @@ export interface InitOptions {
   csp?: string;
   maxAge?: string | number;
   signer?: string[];
+  policy?: string; // test, production, or a path to a policy file
   keys?: string | number; // generate this many Sigsum keys instead of passing --signer
   threshold?: string | number;
   casUrl?: string;
@@ -85,6 +92,10 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
     const maxAge = options.maxAge ?? (await ask("max-age", "max-age (seconds a signed manifest stays valid)", String(DEFAULT_MAX_AGE)));
     const rest: InitOptions = { ...options };
     if (type === "sigsum") {
+      rest.policy ??= await choose("policy", [...Object.entries(SIGSUM_POLICIES).map(([k, p]) => [k, p.title] as [string, string]), ["file", "Path to your own policy file"]], "test");
+      if (rest.policy === "file") {
+        rest.policy = await ask("policy", "policy file path");
+      }
       if (!rest.signer && rest.keys === undefined) {
         rest.keys = await ask("keys", "how many signing keys to generate now with sigsum-key (0 to use existing public keys)", "2");
       }
@@ -121,6 +132,16 @@ export async function runInit(options: InitOptions): Promise<void> {
       }
     },
   ]);
+  const chosen = SIGSUM_POLICIES[a.policy ?? "test"];
+  const policyText =
+    a.type !== "sigsum"
+      ? ""
+      : chosen
+        ? await builtinPolicyText(chosen.name).catch((err) => {
+            if (chosen === SIGSUM_POLICIES.test) return SIGSUM_TEST_POLICY;
+            throw invalid(`the ${a.policy} policy needs the sigsum-policy tool (go install sigsum.org/sigsum-go/cmd/sigsum-policy@latest): ${causeOf(err)}`);
+          })
+        : await readText(a.policy!, "policy");
   let signers = a.signer ?? [];
   let keyPaths: string[] = [];
   if (a.type === "sigsum" && Number(a.keys) > 0) {
@@ -133,11 +154,19 @@ export async function runInit(options: InitOptions): Promise<void> {
       log("added keys/ to .gitignore");
     }
   }
+  // Production logs only accept submissions carrying a token signed by a key published in the domain's DNS.
+  let tokenHex: string | undefined;
+  if (a.type === "sigsum" && chosen?.rateLimited) {
+    const tokenPath = `${a.dir}/keys/token`;
+    await generateSigsumKey(tokenPath).catch(() => undefined); // keep an existing token key
+    tokenHex = Buffer.from(await deriveSignerKeyFromPrivateKey(tokenPath), "base64url").toString("hex");
+    log(`wrote ${path.relative(process.cwd(), tokenPath)} (rate-limit token key, keep it out of the repo)`);
+  }
   const enrollment =
     a.type === "sigsum"
       ? buildEnrollmentObject({
           type: "sigsum",
-          ...(await sigsumEnrollmentFromPolicy(SIGSUM_TEST_POLICY)),
+          ...(await sigsumEnrollmentFromPolicy(policyText)),
           signers,
           threshold: a.threshold ?? 1,
           maxAge: a.maxAge,
@@ -153,7 +182,7 @@ export async function runInit(options: InitOptions): Promise<void> {
   const config = { app: a.origin, version: a.version, default_csp: a.csp, default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
   const files: Array<[string, string]> = [
     ["webcat.config.json", JSON.stringify(config, null, 2) + "\n"],
-    ...(a.type === "sigsum" ? [["trust_policy", SIGSUM_TEST_POLICY] as [string, string]] : []),
+    ...(a.type === "sigsum" ? [["trust_policy", policyText] as [string, string]] : []),
     [".well-known/webcat/enrollment.json", JSON.stringify(enrollment, null, 2) + "\n"],
   ];
   await mkdir(`${a.dir}/.well-known/webcat`, { recursive: true });
@@ -163,12 +192,19 @@ export async function runInit(options: InitOptions): Promise<void> {
   }
   const host = new URL(a.origin).host;
   const key = keyPaths[0] ?? "<private key>";
+  const token = tokenHex ? ` --token-signing-key keys/token --token-domain ${host}` : "";
   const sign =
     a.type === "sigsum"
-      ? `webcat manifest sign -k ${key} -o manifest.signed.json      # repeat with each key up to the threshold`
+      ? `webcat manifest sign -k ${key}${token} -o manifest.signed.json      # repeat with each key up to the threshold`
       : "webcat manifest sign --type sigstore -o manifest.signed.json  # in CI with the identity above, or --interactive";
+  const dns = tokenHex
+    ? `
+  0. Publish this DNS record so the production logs accept your submissions:
+       _sigsum_v1.${host}. IN TXT "${tokenHex}"`
+    : "";
+  const cas = a.type === "sigsum" ? `\n  7. Serve the cas/ directory that manifest sign writes at ${a.casUrl} (files named by their sha256)` : "";
   stdout.write(`
-Next steps
+Next steps${dns}
   1. Serve the .well-known/webcat/ directory at ${a.origin}/.well-known/webcat/
   2. Send this header on every response, byte for byte:
        Content-Security-Policy: ${a.csp}
@@ -178,6 +214,6 @@ Next steps
        webcat bundle create -o .well-known/webcat/bundle.json
   4. Deploy, then check what visitors will see:   webcat site check ${host}
   5. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}
-  6. Follow promotion on the chain:               webcat enrollment status ${host}
+  6. Follow promotion on the chain:               webcat enrollment status ${host}${cas}
 `);
 }
