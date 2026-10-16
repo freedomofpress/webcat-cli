@@ -11,6 +11,7 @@ import {
   invalid,
   parseInteger,
   readJson,
+  readText,
   toBase64Url,
   validateAll,
   validateCasUrl,
@@ -33,6 +34,20 @@ export { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreE
 
 export const parseSignerKey = (value: string): string => toBase64Url(decodeKeyMaterial(value, "--signer"));
 
+// The raw 32-byte key inside an OpenSSH "ssh-ed25519 <base64> comment" line, as a base64url enrollment signer.
+export function signerFromOpenSsh(line: string): string {
+  const [type, blob] = line.trim().split(/\s+/);
+  const raw = type === "ssh-ed25519" && blob ? Buffer.from(blob, "base64") : Buffer.alloc(0);
+  if (raw.length !== 51) {
+    throw invalid(`expected an OpenSSH ed25519 public key line, got '${line.trim().slice(0, 40)}'`);
+  }
+  return toBase64Url(raw.subarray(-32)); // string "ssh-ed25519" + 32-byte key, both length-prefixed
+}
+
+// --signer values: hex, base64, or the path of an OpenSSH .pub file (e.g. a hardware key reachable through ssh-agent).
+export const signerFromValue = async (value: string): Promise<string> =>
+  value.endsWith(".pub") ? signerFromOpenSsh(await readText(value, "signer public key")) : parseSignerKey(value);
+
 // CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated enrollment.
 export async function buildEnrollmentObject(
   o:
@@ -41,76 +56,95 @@ export async function buildEnrollmentObject(
 ): Promise<Enrollment> {
   const max_age = parseInteger(o.maxAge, "--max-age");
   if (o.type === "sigstore") {
-    return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age });
+    return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
   }
-  const { signerFromValue } = await import("./sigsum.js"); // sigsum.ts imports this module; resolve lazily
   const signers = await Promise.all(o.signers.map(signerFromValue));
-  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs });
+  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs }, { authoring: true });
 }
 
-// The extension's validators decide what an enrollment is. The CLI only adds authoring guards the
-// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, CAS URL, max_age range.
-export function parseEnrollmentObject(parsed: unknown): Enrollment {
+// The extension's validators decide what an enrollment is; that is all that is checked on anything read from disk or
+// the network, so the CLI accepts exactly what browsers accept. When authoring (create, init) the CLI adds guards the
+// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, CAS URL, max_age range, logs <-> policy.
+export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {}): Enrollment {
   const e = ensureObject(parsed, "enrollment");
-  const type = e.type ?? EnrollmentTypes.Sigsum; // legacy enrollments predate the type field
-  if (type === EnrollmentTypes.Sigstore) {
-    const enrollment = { ...e, type } as SigstoreEnrollment;
+  if (e.type !== EnrollmentTypes.Sigsum && e.type !== EnrollmentTypes.Sigstore) {
+    throw invalid("enrollment.type must be 'sigsum' or 'sigstore'; browsers reject enrollments without it");
+  }
+  const encodable = () => {
+    if (canonicalize(e) === null) {
+      throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
+    }
+  };
+  if (e.type === EnrollmentTypes.Sigstore) {
+    const enrollment = e as unknown as SigstoreEnrollment;
     validateAll([
       () => check(validateSigstoreEnrollment(enrollment), "enrollment"),
-      () => {
-        if (Object.keys(enrollment.claims ?? {}).some((oid) => !OID_RE.test(oid))) {
-          throw invalid("enrollment.claims keys must be OIDs");
-        }
-      },
-      () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
+      encodable,
+      ...(authoring
+        ? [
+            () => {
+              if (Object.keys(enrollment.claims ?? {}).some((oid) => !OID_RE.test(oid))) {
+                throw invalid("enrollment.claims keys must be OIDs");
+              }
+            },
+            () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
+          ]
+        : []),
     ]);
     return enrollment;
   }
-  if (type !== EnrollmentTypes.Sigsum) {
-    throw invalid("enrollment.type must be 'sigsum' or 'sigstore'");
-  }
-  const enrollment = { ...e, type } as SigsumEnrollment;
+  const enrollment = e as unknown as SigsumEnrollment;
   const signers = Array.isArray(enrollment.signers) ? enrollment.signers : [];
-  // The compiled policy is what browsers enforce; enrollment.logs only tells auditors where those logs live. Keep them in step.
-  const policyLogs = compiledPolicyLogs(enrollment.policy);
+  const policyLogs = authoring ? compiledPolicyLogs(enrollment.policy) : [];
   const listedLogs = typeof enrollment.logs === "object" && enrollment.logs !== null ? Object.entries(enrollment.logs) : [];
   validateAll([
     () => check(validateSigsumEnrollment(enrollment), "enrollment"),
-    () => {
-      if (policyLogs instanceof Error) {
-        throw invalid(`enrollment.policy must be a compiled Sigsum policy: ${causeOf(policyLogs)}`);
-      }
-    },
-    ...(Array.isArray(policyLogs)
-      ? policyLogs
-          .filter((key) => !listedLogs.some(([k]) => k === key))
-          .map((key) => () => {
-            throw invalid(`enrollment.logs must give the URL of log ${key}, which the policy trusts`);
-          })
+    encodable,
+    ...(authoring
+      ? [
+          ...signers.map((signer, i) => () => decodeKeyMaterial(String(signer), `enrollment.signers[${i}]`)),
+          () => {
+            if (new Set(signers).size !== signers.length) {
+              throw invalid("enrollment.signers must not contain duplicates");
+            }
+          },
+          () => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url"),
+          () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
+          () => {
+            if (policyLogs instanceof Error) {
+              throw invalid(`enrollment.policy must be a compiled Sigsum policy: ${causeOf(policyLogs)}`);
+            }
+          },
+          ...(Array.isArray(policyLogs)
+            ? policyLogs
+                .filter((key) => !listedLogs.some(([k]) => k === key))
+                .map((key) => () => {
+                  throw invalid(`enrollment.logs must give the URL of log ${key}, which the policy trusts`);
+                })
+            : []),
+          ...listedLogs.map(([key, url]) => () => {
+            if (Array.isArray(policyLogs) && !policyLogs.includes(key)) {
+              throw invalid(`enrollment.logs lists ${key}, which is not a log in the policy`);
+            }
+            try {
+              new URL(String(url));
+            } catch (err) {
+              throw invalid(`enrollment.logs[${key}] must be a URL: ${causeOf(err)}`);
+            }
+          }),
+        ]
       : []),
-    ...listedLogs.map(([key, url]) => () => {
-      if (Array.isArray(policyLogs) && !policyLogs.includes(key)) {
-        throw invalid(`enrollment.logs lists ${key}, which is not a log in the policy`);
-      }
-      try {
-        new URL(String(url));
-      } catch (err) {
-        throw invalid(`enrollment.logs[${key}] must be a URL: ${causeOf(err)}`);
-      }
-    }),
-    ...signers.map((signer, i) => () => decodeKeyMaterial(String(signer), `enrollment.signers[${i}]`)),
-    () => {
-      if (new Set(signers).size !== signers.length) {
-        throw invalid("enrollment.signers must not contain duplicates");
-      }
-    },
-    () => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url"),
-    () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
   ]);
   return enrollment;
 }
 
 // Same canonical form the oracles and the extension hash.
-export const canonicalizeEnrollment = (enrollment: Enrollment): string => canonicalize(enrollment)!; // validated enrollments are plain JSON
+export function canonicalizeEnrollment(enrollment: Enrollment): string {
+  const canonical = canonicalize(enrollment);
+  if (canonical === null) {
+    throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
+  }
+  return canonical;
+}
 
 export const loadEnrollment = async (path: string): Promise<Enrollment> => parseEnrollmentObject(await readJson(path, "enrollment"));

@@ -7,7 +7,7 @@ import { type WebcatLeavesFile, verifyWebcatProof } from "@freedomofpress/ics23/
 import { defaults } from "@freedomofpress/webcat/config";
 import { extractHostname, extractRawHash } from "@freedomofpress/webcat/webcat/parsers";
 import { type Enrollment, canonicalizeEnrollment, parseEnrollmentObject } from "./enrollment.js";
-import { causeOf, external, invalid, sha256 } from "./utils.js";
+import { causeOf, external, fetchJson, invalid, sha256 } from "./utils.js";
 
 export const DEFAULT_CHAIN_API = "https://webcat-sentry-1.freedom.press";
 export const DEFAULT_LIST_ENDPOINT = defaults.endpoint; // serves list.json and block.json, the extension's own update source
@@ -43,18 +43,6 @@ export const bareDomain = (domain: string): string => toFqdn(domain).slice(0, -1
 
 export const enrollmentHashHex = (enrollment: Enrollment): string => sha256(canonicalizeEnrollment(enrollment)).toString("hex");
 
-async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  const response = await fetch(url, init).catch((err) => {
-    throw external(`failed to fetch ${url}: ${causeOf(err)}`);
-  });
-  if (!response.ok) {
-    throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
-  }
-  return response.json().catch((err) => {
-    throw external(`failed to fetch ${url}: not valid JSON: ${causeOf(err)}`);
-  });
-}
-
 const joinUrl = (base: string, path: string): string => `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 
 // Fetches the enrollment a domain currently serves, exactly like an oracle would.
@@ -77,7 +65,9 @@ export async function fetchServedEnrollment(domain: string): Promise<{ hash: str
   return { hash: enrollmentHashHex(enrollment), enrollment };
 }
 
-export const fetchOracles = (chainApi: string): Promise<Oracle[]> => fetchJson(joinUrl(chainApi, "/oracles"));
+// Oracle endpoints come from the chain API unverified; only ever POST to https ones.
+export const fetchOracles = async (chainApi: string): Promise<Oracle[]> =>
+  ((await fetchJson(joinUrl(chainApi, "/oracles"))) as Oracle[]).filter((o) => typeof o?.endpoint === "string" && o.endpoint.startsWith("https://"));
 
 export async function fetchDomainStatus(chainApi: string, domain: string): Promise<DomainStatus> {
   const fqdn = toFqdn(domain);
@@ -95,8 +85,8 @@ export async function fetchDomainStatus(chainApi: string, domain: string): Promi
 }
 
 // list.json leaves are decoded exactly as the extension does: bare domain -> hex sha256 of the canonical enrollment.
-export const parseListLeaves = (list: { block_height: number; leaves: [string, string][] }): Map<string, string> =>
-  new Map(list.leaves.map(([key, value]) => [extractHostname(key), Buffer.from(extractRawHash(value)).toString("hex")]));
+export const parseListLeaves = (leaves: readonly (readonly string[])[]): Map<string, string> =>
+  new Map(leaves.map(([key, value]) => [extractHostname(key), Buffer.from(extractRawHash(value)).toString("hex")]));
 
 export interface VerifiedList {
   blockHeight: number;
@@ -108,20 +98,25 @@ export interface VerifiedList {
 // the chain's validators (set and chain id shipped with the extension), and the leaves must prove into its app hash.
 export async function verifyList(list: WebcatLeavesFile, block: unknown, source = "the published list"): Promise<VerifiedList> {
   const { proto: validators, cryptoIndex } = await importValidators(defaults.validatorSet);
-  const commit = await verifyCommit(importCommit(block as any), validators, cryptoIndex, defaults.chainId).catch((err) => {
+  let signedHeader;
+  let commit;
+  try {
+    signedHeader = importCommit(block as any);
+    commit = await verifyCommit(signedHeader, validators, cryptoIndex, defaults.chainId);
+  } catch (err) {
     throw external(`failed to verify ${source}: ${causeOf(err)}`);
-  });
-  if (!commit.ok || !commit.headerTime) {
+  }
+  if (!commit.ok || !commit.headerTime || !signedHeader.header) {
     throw external(`failed to verify ${source}: block commit is not signed by a quorum of the ${defaults.chainId} validators`);
   }
-  if (Buffer.from(commit.appHash).toString("hex") !== list.proof?.app_hash) {
+  if (!Buffer.from(commit.appHash).equals(Buffer.from(String(list.proof?.app_hash ?? ""), "hex"))) {
     throw external(`failed to verify ${source}: list app hash does not match the verified block`);
   }
   const leaves = await verifyWebcatProof(list);
   if (leaves === false) {
     throw external(`failed to verify ${source}: leaves do not prove into the block's app hash`);
   }
-  return { blockHeight: list.block_height, blockTime: new Date(Number(commit.headerTime.seconds) * 1000), leaves: parseListLeaves({ block_height: list.block_height, leaves: leaves as [string, string][] }) };
+  return { blockHeight: Number(signedHeader.header.height), blockTime: new Date(Number(commit.headerTime.seconds) * 1000), leaves: parseListLeaves(leaves) };
 }
 
 export async function fetchVerifiedList(endpoint: string): Promise<VerifiedList> {

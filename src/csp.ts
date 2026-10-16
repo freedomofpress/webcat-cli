@@ -2,7 +2,7 @@
 // docs.webcat.tech/webapp-developers/CSP.html, then proposes the nearest policy that passes the extension's validator.
 import { parseContentSecurityPolicy } from "@freedomofpress/webcat/webcat/parsers";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
-import { causeOf, external } from "./utils.js";
+import { causeOf, fetchOk } from "./utils.js";
 
 export const CSP_DOCS = "https://docs.webcat.tech/webapp-developers/CSP.html";
 
@@ -94,7 +94,7 @@ export function hintCsp(csp: string): CspReport {
       out.set(dir, kept.length ? kept : ["'self'"]);
     }
   }
-  if (!d.has("script-src") && !d.has("script-src-elem") && !strict) {
+  if (!d.has("script-src") && !strict) {
     add("missing", "script-src");
     out.set("script-src", ["'self'"]);
   }
@@ -114,7 +114,7 @@ export function hintCsp(csp: string): CspReport {
       }
     }
   }
-  if (!d.has("style-src") && !d.has("style-src-elem") && !strict) {
+  if (!d.has("style-src") && !strict) {
     add("missing", "style-src");
     out.set("style-src", ["'self'"]);
   }
@@ -191,12 +191,12 @@ export function formatCspReport(report: CspReport): string {
 
 // The policy a site sends: the header, or a <meta http-equiv> tag as a fallback.
 export async function fetchSiteCsp(url: string): Promise<{ csp: string | null; from: string }> {
-  const response = await fetch(url, { redirect: "follow" }).catch((err) => {
-    throw external(`failed to fetch ${url}: ${causeOf(err)}`);
-  });
+  const response = await fetchOk(url, { redirect: "follow" });
   const header = response.headers.get("content-security-policy");
   if (header) return { csp: header, from: "Content-Security-Policy header" };
   const html = await response.text();
-  const meta = html.match(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*content=["']([^"']+)["']/i) ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*http-equiv=["']content-security-policy["']/i);
-  return meta ? { csp: meta[1], from: "<meta http-equiv> tag (WEBCAT requires the header, the tag alone is not enough)" } : { csp: null, from: "none" };
+  const tag = html.match(/<meta\b[^>]*http-equiv=["']content-security-policy["'][^>]*>/i)?.[0];
+  const content = tag?.match(/content=(?:"([^"]*)"|'([^']*)')/i);
+  const csp = content?.[1] ?? content?.[2];
+  return csp ? { csp, from: "<meta http-equiv> tag (WEBCAT requires the header, the tag alone is not enough)" } : { csp: null, from: "none" };
 }

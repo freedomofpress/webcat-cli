@@ -3,13 +3,11 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
 import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
 import { loadBundleDocument } from "../src/bundle";
 import { SIGSUM_TEST_POLICY } from "../src/init";
 import { sigsumEnrollmentFromPolicy } from "../src/sigsum";
 import { parseListLeaves, solvePow, toFqdn, verifyList } from "../src/chain";
-import { writeCasObject } from "../src/cas";
 import {
   buildManifest,
   loadManifestConfig,
@@ -244,7 +242,7 @@ describe("enrollment helpers", () => {
         max_age: 1_000_000,
         cas_url: "https://example.com",
         logs: real.logs,
-      }),
+      }, { authoring: true }),
     ).toThrow("enrollment.signers must not contain duplicates");
 
     expect(() =>
@@ -257,10 +255,14 @@ describe("enrollment helpers", () => {
     ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_TRUSTED_ROOT_MISSING");
 
     const base = { type: "sigsum", policy: real.policy, signers: [hexToBase64Url(baseSigner)], threshold: 1, max_age: 1_000_000, cas_url: "https://example.com" };
-    expect(() => parseEnrollmentObject({ ...base, logs: { ...real.logs, AAAA: "https://other.example" } })).toThrow("enrollment.logs lists AAAA, which is not a log in the policy");
-    expect(() => parseEnrollmentObject({ ...base, logs: { AAAA: "https://other.example" } })).toThrow(/enrollment.logs must give the URL of log \S+, which the policy trusts/);
-    expect(() => parseEnrollmentObject({ ...base, policy: "bm90LWEtcG9saWN5", logs: real.logs })).toThrow("enrollment.policy must be a compiled Sigsum policy");
-    expect(() => parseEnrollmentObject({ ...base, logs: real.logs })).not.toThrow();
+    const authoring = { authoring: true };
+    expect(() => parseEnrollmentObject({ ...base, logs: { ...real.logs, AAAA: "https://other.example" } }, authoring)).toThrow("enrollment.logs lists AAAA, which is not a log in the policy");
+    expect(() => parseEnrollmentObject({ ...base, logs: { AAAA: "https://other.example" } }, authoring)).toThrow(/enrollment.logs must give the URL of log \S+, which the policy trusts/);
+    expect(() => parseEnrollmentObject({ ...base, policy: "bm90LWEtcG9saWN5", logs: real.logs }, authoring)).toThrow("enrollment.policy must be a compiled Sigsum policy");
+    expect(() => parseEnrollmentObject({ ...base, logs: real.logs }, authoring)).not.toThrow();
+    // Read from disk or the network, only the browser's rules apply: a two-year max_age or a stray log entry still parses.
+    expect(() => parseEnrollmentObject({ ...base, max_age: 2 * 365 * 86_400, logs: { ...real.logs, AAAA: "https://other.example" } })).not.toThrow();
+    expect(() => parseEnrollmentObject({ ...base, type: undefined, logs: real.logs })).toThrow("enrollment.type must be 'sigsum' or 'sigstore'");
 
     expect(() =>
       parseEnrollmentObject({
@@ -268,37 +270,26 @@ describe("enrollment helpers", () => {
         trusted_root: {},
         claims: { not_oid: "id" },
         max_age: 1_000_000,
-      }),
+      }, { authoring: true }),
     ).toThrow("enrollment.claims keys must be OIDs");
   });
 });
 
 describe("CAS resolution", () => {
-  it("resolves from leaf checksum to manifest via CAS", async () => {
+  it("lets an auditor walk from a log entry's checksum to the manifest", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
     const cwd = process.cwd();
     process.chdir(dir);
     try {
-      const canonicalManifest = JSON.stringify({ manifest: { app: "demo" }, signatures: {} });
-      const messageHash = createHash("sha256").update(canonicalManifest).digest();
-      const checksum = new Hash(createHash("sha256").update(messageHash).digest());
-      const signature = new Signature(new Uint8Array(64));
-      const keyHash = new KeyHash(new Uint8Array(32));
-      const leafBytes = new Leaf(checksum, signature, keyHash).toBytes();
-
-      const { hash: leafHash } = await writeCasObject(leafBytes);
-      await writeCasObject(messageHash);
-      await writeCasObject(canonicalManifest);
-
-      const storedLeaf = await readFile(path.join(dir, "cas", leafHash));
-      const storedChecksum = storedLeaf.subarray(1, 33);
-      const checksumHex = Buffer.from(storedChecksum).toString("hex");
-
-      const storedMessageHash = await readFile(path.join(dir, "cas", checksumHex));
-      const messageHashHex = Buffer.from(storedMessageHash).toString("hex");
-
-      const storedManifest = await readFile(path.join(dir, "cas", messageHashHex), "utf8");
-      expect(storedManifest).toBe(canonicalManifest);
+      const canonicalManifest = JSON.stringify({ app: "demo" });
+      const { publishManifestToCas } = await import("../src/cas");
+      await publishManifestToCas(canonicalManifest);
+      // The Sigsum leaf checksum is sha256(message) where message = sha256(manifest); both are CAS object names.
+      const message = createHash("sha256").update(canonicalManifest).digest();
+      const leafChecksumHex = createHash("sha256").update(message).digest("hex");
+      const storedMessage = await readFile(path.join(dir, "cas", leafChecksumHex));
+      expect(storedMessage.equals(message)).toBe(true);
+      expect(await readFile(path.join(dir, "cas", storedMessage.toString("hex")), "utf8")).toBe(canonicalManifest);
     } finally {
       process.chdir(cwd);
       await rm(dir, { recursive: true, force: true });
@@ -441,6 +432,7 @@ describe("policy and bundle parsing", () => {
       bundlePath,
       JSON.stringify({
         enrollment: {
+          type: "sigsum",
           policy: real.policy,
           signers: [""],
           threshold: 1,
@@ -471,6 +463,7 @@ describe("policy and bundle parsing", () => {
       bundlePath,
       JSON.stringify({
         enrollment: {
+          type: "sigsum",
           policy: real.policy,
           signers: ["abc"],
           threshold: 1,
@@ -510,7 +503,7 @@ describe("csp hints", () => {
 
 describe("openssh public keys", () => {
   it("extracts the raw ed25519 key from an OpenSSH public key line", async () => {
-    const { signerFromOpenSsh } = await import("../src/sigsum");
+    const { signerFromOpenSsh } = await import("../src/enrollment");
     expect(signerFromOpenSsh("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKTjWh18iv9sSOg18yWXS1IepFJclk9Aq5XRRfPL2Iq0 hw-sim")).toBe(hexToBase64Url("a4e35a1d7c8aff6c48e835f325974b521ea4525c964f40ab95d145f3cbd88ab4"));
     expect(() => signerFromOpenSsh("ssh-rsa AAAA")).toThrow("expected an OpenSSH ed25519 public key line");
   });
@@ -544,8 +537,9 @@ describe("trusted root drift", () => {
     };
     expect(trustedRootDrift(pinned, pinned)).toEqual([]);
     const { signingBlockedBy } = await import("../src/sigstore");
-    expect(signingBlockedBy(pinned, community, new Date("2026-06-01"))).toEqual([]); // CA A still active: additions only
-    expect(signingBlockedBy(pinned, community, new Date("2027-06-01"))).toEqual(["no currently valid certificate authority in the community root is in the enrollment's trusted root"]);
+    expect(signingBlockedBy(pinned, community, { now: new Date("2026-06-01") })).toEqual([]); // CA A still active: additions only
+    expect(signingBlockedBy(pinned, community, { now: new Date("2027-06-01") })).toEqual(["no currently valid certificate authority in the community root is in the enrollment's trusted root"]);
+    expect(trustedRootDrift(pinned, community, new Date("2030-01-01"))).not.toContain("new certificate authority https://fulcio (valid from 2022) is not in the enrollment's trusted root");
     expect(trustedRootDrift(pinned, community)).toEqual([
       "certificate authority https://fulcio ends on 2027-01-01 in the community root",
       "new certificate authority https://fulcio (valid from 2026) is not in the enrollment's trusted root",
@@ -597,7 +591,7 @@ describe("enrollment chain client", () => {
     const list = JSON.parse(await readFile(path.join(__dirname, "fixtures/list.json"), "utf8"));
     const block = JSON.parse(await readFile(path.join(__dirname, "fixtures/block.json"), "utf8"));
     const verified = await verifyList(list, block);
-    expect(verified.blockHeight).toBe(list.block_height);
+    expect(verified.blockHeight).toBe(Number(block.signed_header.header.height)); // the verified block, one past the list's snapshot
     expect(verified.leaves.get("lsd.cat")).toMatch(/^[0-9a-f]{64}$/);
     const tampered = { ...list, leaves: list.leaves.map((l: string[], i: number) => (i === 0 ? [l[0], "0a20" + "ab".repeat(32)] : l)) };
     await expect(verifyList(tampered, block)).rejects.toThrow("leaves do not prove into the block's app hash");
@@ -609,10 +603,7 @@ describe("enrollment chain client", () => {
   });
 
   it("decodes list.json leaves into domain -> hash", () => {
-    const entries = parseListLeaves({
-      block_height: 1,
-      leaves: [["canonical/.cat.lsd", "0a20" + "ab".repeat(32)], ["canonical/.org.endeixis.www", "0a20" + "cd".repeat(32)]],
-    });
+    const entries = parseListLeaves([["canonical/.cat.lsd", "0a20" + "ab".repeat(32)], ["canonical/.org.endeixis.www", "0a20" + "cd".repeat(32)]]);
     expect(entries.get("lsd.cat")).toBe("ab".repeat(32));
     expect(entries.get("www.endeixis.org")).toBe("cd".repeat(32));
     expect(toFqdn("Example.COM")).toBe("example.com.");

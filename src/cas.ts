@@ -2,7 +2,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { buildLeafBytesFromProof } from "./sigsum.js";
 import { causeOf, external, invalid, sha256 } from "./utils.js";
 
 export interface CasWriteResult {
@@ -45,15 +44,11 @@ export async function writeCasObject(data: Uint8Array | string, uploader: Upload
   return { hash, filePath };
 }
 
-// Publishes the objects a monitor needs to walk from a Sigsum leaf back to the manifest:
-// the raw leaf, the checksum preimage (sha256 of the manifest), and the canonical manifest.
-export async function publishSigsumProofToCas(
-  canonicalManifest: string,
-  proofText: string,
-): Promise<{ leaf: CasWriteResult; checksum: CasWriteResult; manifest: CasWriteResult }> {
+// Publishes what an auditor needs to walk from a Sigsum log entry back to the manifest. The leaf itself is in the
+// log; its checksum is sha256(message) and names the message object, whose hex names the canonical manifest.
+export async function publishManifestToCas(canonicalManifest: string): Promise<{ checksum: CasWriteResult; manifest: CasWriteResult }> {
   const uploader = uploaderFromEnv();
-  const leaf = await writeCasObject(await buildLeafBytesFromProof(canonicalManifest, proofText), uploader);
   const checksum = await writeCasObject(sha256(canonicalManifest), uploader);
   const manifest = await writeCasObject(canonicalManifest, uploader);
-  return { leaf, checksum, manifest };
+  return { checksum, manifest };
 }

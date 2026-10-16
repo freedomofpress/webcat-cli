@@ -16,7 +16,7 @@ import {
   type Witness,
 } from "@sigstore/sign";
 import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
-import { causeOf, ensureObject, external, invalid, log, sha256 } from "./utils.js";
+import { causeOf, ensureObject, external, fetchJson, invalid, log, sha256 } from "./utils.js";
 
 export { DEFAULT_FULCIO_URL, DEFAULT_REKOR_URL };
 export const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
@@ -53,21 +53,24 @@ export const SIGSTORE_CLAIM_FLAGS: ReadonlyArray<readonly [flag: string, oid: st
   ["deployment-environment", "1.3.6.1.4.1.57264.1.23"],
 ];
 
+// Trusted-root entries by kind: logs are identified by public key, CAs and TSAs by their leaf certificate.
+const ROOT_KINDS: Array<[field: string, kind: string, id: (e: any) => string, label: (e: any) => string, validFor: (e: any) => any]> = [
+  ["certificateAuthorities", "certificate authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
+  ["tlogs", "transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
+  ["ctlogs", "certificate transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
+  ["timestampAuthorities", "timestamp authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
+];
+const activeAt = (validFor: any, now: Date): boolean => (!validFor?.start || new Date(validFor.start) <= now) && (!validFor?.end || new Date(validFor.end) > now);
+
 // What the community root has that a pinned enrollment root lacks: each line is a reason a re-enrollment is coming.
-// Logs are identified by public key, CAs and TSAs by their leaf certificate.
-export function trustedRootDrift(pinned: any, community: any): string[] {
-  const kinds: Array<[field: string, kind: string, id: (e: any) => string, label: (e: any) => string, validFor: (e: any) => any]> = [
-    ["certificateAuthorities", "certificate authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
-    ["tlogs", "transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
-    ["ctlogs", "certificate transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
-    ["timestampAuthorities", "timestamp authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
-  ];
+export function trustedRootDrift(pinned: any, community: any, now = new Date()): string[] {
   const drift: string[] = [];
-  for (const [field, kind, id, label, validFor] of kinds) {
+  for (const [field, kind, id, label, validFor] of ROOT_KINDS) {
     const mine = new Map<string, any>((pinned?.[field] ?? []).map((e: any) => [id(e), e]));
     for (const entry of community?.[field] ?? []) {
       const pinnedEntry = mine.get(id(entry));
       if (!pinnedEntry) {
+        if (validFor(entry)?.end && new Date(validFor(entry).end) < now) continue; // already retired, nothing to adopt
         drift.push(`new ${kind} ${label(entry)} (valid from ${validFor(entry)?.start ?? "?"}) is not in the enrollment's trusted root`);
       } else if (validFor(entry)?.end && !validFor(pinnedEntry)?.end) {
         drift.push(`${kind} ${label(entry)} ends on ${validFor(entry).end} in the community root`);
@@ -79,20 +82,16 @@ export function trustedRootDrift(pinned: any, community: any): string[] {
 
 // Drift that stops signing: for a service kind the signer relies on, none of the community root's currently
 // valid entries is in the pinned root, so nothing issued today can verify under the enrollment.
-export function signingBlockedBy(pinned: any, community: any, now = new Date()): string[] {
-  const kinds: Array<[field: string, kind: string, id: (e: any) => string, validFor: (e: any) => any]> = [
-    ["certificateAuthorities", "certificate authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.validFor],
-    ["tlogs", "transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.publicKey?.validFor],
-    ["ctlogs", "certificate transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.publicKey?.validFor],
-    ["timestampAuthorities", "timestamp authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.validFor],
-  ];
-  const active = (v: any) => (!v?.start || new Date(v.start) <= now) && (!v?.end || new Date(v.end) > now);
+// TSAs only matter when the signer asks for a timestamp.
+export function signingBlockedBy(pinned: any, community: any, options: { withTsa?: boolean; now?: Date } = {}): string[] {
+  const now = options.now ?? new Date();
   const blocked: string[] = [];
-  for (const [field, kind, id, validFor] of kinds) {
-    const current = (community?.[field] ?? []).filter((e: any) => active(validFor(e)));
+  for (const [field, kind, id, , validFor] of ROOT_KINDS) {
+    if (field === "timestampAuthorities" && !options.withTsa) continue;
+    const current = (community?.[field] ?? []).filter((e: any) => activeAt(validFor(e), now));
     const pinnedIds = new Set((pinned?.[field] ?? []).map(id));
     if (current.length === 0 || pinnedIds.size === 0) {
-      continue; // the enrollment never relied on this kind (e.g. no TSA), or the public instance has none right now
+      continue; // the enrollment never relied on this kind, or the public instance has none right now
     }
     if (!current.some((e: any) => pinnedIds.has(id(e)))) {
       blocked.push(`no currently valid ${kind} in the community root is in the enrollment's trusted root`);
@@ -140,13 +139,7 @@ function openInBrowser(url: string): void {
 
 export async function fetchInteractiveOidcToken(options: OidcDeviceFlowOptions): Promise<string> {
   const configUrl = `${options.issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
-  const configResponse = await fetch(configUrl).catch((err) => {
-    throw external(`failed to fetch OIDC configuration from ${configUrl}: ${causeOf(err)}`);
-  });
-  if (!configResponse.ok) {
-    throw external(`failed to fetch OIDC configuration from ${configUrl}: HTTP ${configResponse.status} ${configResponse.statusText}`);
-  }
-  const config = await configResponse.json();
+  const config = await fetchJson(configUrl);
   if (!config.device_authorization_endpoint || !config.token_endpoint) {
     throw external(`failed to use OIDC configuration from ${configUrl}: no device authorization or token endpoint`);
   }

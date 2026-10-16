@@ -85,27 +85,33 @@ const isDocumentPath = (pathname: string): boolean => pathname === "/" || pathna
 async function checkPath(origin: string, manifest: ManifestContent, pathname: string): Promise<PathCheck> {
   const problems: string[] = [];
   const isDocument = isDocumentPath(pathname);
+  if (!pathname.startsWith("/")) {
+    return { path: pathname, problems: ["manifest paths must start with '/'"] };
+  }
   const response = await fetch(origin + pathname, { redirect: "manual" }).catch((err) => {
     throw external(`failed to fetch ${origin}${pathname}: ${causeOf(err)}`);
   });
-  if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location") ?? "";
+  // The extension validates headers on every response, redirects included.
+  problems.push(...checkHeaders(manifest, pathname, response.headers));
+  const location = response.headers.get("location");
+  if (location !== null) {
     let sameOrigin = false;
     try {
       sameOrigin = new URL(location, origin).origin === origin;
     } catch {}
     // Same-origin redirects of documents are allowed; the target is a path of its own.
     if (!isDocument) {
-      problems.push(`redirects to '${location}': the extension rejects redirects on subresources`);
+      problems.push(`has a location header ('${location}'): the extension rejects redirects on subresources`);
     } else if (!sameOrigin) {
       problems.push(`redirects to '${location}': the extension rejects cross-origin redirects`);
     }
-    return { path: pathname, problems };
+    if (response.status >= 300 && response.status < 400) {
+      return { path: pathname, problems };
+    }
   }
   if (response.status !== 200) {
     problems.push(`HTTP ${response.status}`);
   }
-  problems.push(...checkHeaders(manifest, pathname, response.headers));
   const expected = expectedHash(manifest, pathname, isDocument);
   if (!expected) {
     problems.push("not in manifest.files, the extension would deny it");
@@ -118,7 +124,8 @@ async function checkPath(origin: string, manifest: ManifestContent, pathname: st
   return { path: pathname, problems };
 }
 
-async function fetchBundle(url: string): Promise<{ bundle: BundleDocument; verdict: string } | null> {
+// A bundle a browser would reject is a verdict, not a crash: malformed JSON or shape is reported as FAILED.
+async function fetchBundle(url: string): Promise<{ bundle?: BundleDocument; verdict: string } | null> {
   const response = await fetch(url).catch((err) => {
     throw external(`failed to fetch ${url}: ${causeOf(err)}`);
   });
@@ -128,7 +135,12 @@ async function fetchBundle(url: string): Promise<{ bundle: BundleDocument; verdi
   if (!response.ok) {
     throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
   }
-  const bundle = parseBundleObject(await response.json(), url);
+  let bundle: BundleDocument;
+  try {
+    bundle = parseBundleObject(await response.json(), url);
+  } catch (err) {
+    return { verdict: `FAILED: ${causeOf(err)}` };
+  }
   const result = await verifyBundle(bundle);
   const verdict = result instanceof WebcatError ? `FAILED: ${describeWebcatError(result)}` : `VERIFIED (${describeValidity(result)})`;
   return { bundle, verdict };
@@ -155,23 +167,30 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
     throw external(`${origin}${defaults.bundlePath} is not found; the extension needs it to verify the site`);
   }
   const previous = await fetchBundle(origin + defaults.bundlePrevPath);
+  if (!current.bundle) {
+    return { bundle: current.verdict, previousBundle: previous ? previous.verdict : "none", enrollment: "not checked, the bundle did not parse", trustedRoot: [], paths: [] };
+  }
   const bundleHash = enrollmentHashHex(current.bundle.enrollment);
   const [served, status] = await Promise.all([
     fetchServedEnrollment(domain).catch((err) => err as Error),
     fetchDomainStatus(options.chainApi, domain).catch((err) => err as Error),
   ]);
-  const enrollment =
+  // Three facts, each judged on its own: what the bundle embeds, what enrollment.json serves, what the chain records.
+  const servedPart =
     served instanceof Error
-      ? `ERROR (${served.message})`
+      ? `enrollment.json ERROR (${served.message})`
       : served === null
-        ? "enrollment.json is not served; browsers only need the chain to list this domain"
-        : served.hash !== bundleHash
-          ? `MISMATCH: bundle.json embeds ${bundleHash} but enrollment.json serves ${served.hash}`
-          : status instanceof Error
-            ? `bundle and enrollment.json agree (${bundleHash}); chain not reachable: ${status.message}`
-            : status.canonical === bundleHash
-              ? `bundle, enrollment.json and chain agree (${bundleHash})`
-              : `MISMATCH: bundle and enrollment.json agree (${bundleHash}) but the chain records ${status.canonical ?? "none"}`;
+        ? "enrollment.json not served (browsers only need the chain)"
+        : served.hash === bundleHash
+          ? "enrollment.json agrees"
+          : `MISMATCH: enrollment.json serves ${served.hash}`;
+  const chainPart =
+    status instanceof Error
+      ? `chain ERROR (${status.message})`
+      : status.canonical === bundleHash
+        ? "chain agrees"
+        : `MISMATCH: the chain records ${status.canonical ?? "nothing"}, browsers will not verify this site`;
+  const enrollment = `bundle embeds ${bundleHash}; ${servedPart}; ${chainPart}`;
   const manifest = current.bundle.manifest.manifest;
   const paths = options.paths?.length ? options.paths : ["/", ...Object.keys(manifest.files)];
   const trustedRoot =
