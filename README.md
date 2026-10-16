@@ -269,7 +269,7 @@ Example – hash the provided manifest:
 
 ```sh
 npx webcat manifest hash -i examples/manifest.json
-# => FzuGGV73J4ayAyrZBLw8NPT364Djuu8h9Mdr1xiMM-o
+# => NXdriZVILywdtSNWw0IR-fKmuT4u-vGL93H9CYdKYnA
 ```
 
 Example – verify a bundle, or an enrollment plus a signed manifest:
@@ -284,8 +284,8 @@ Verification, and all enrollment, manifest and CSP validation, is done by
 browser extension's own code, so the CLI accepts exactly what browsers accept. Failures
 are reported with the extension's error codes (`ERR_WEBCAT_...`), for example an expired
 manifest is `ERR_WEBCAT_MANIFEST_EXPIRED`. A successful verification prints the time until
-which the manifest stays valid. Note that `examples/` predates the `logs` field and its
-timestamp has expired, so verifying it fails, as it would in the browser.
+which the manifest stays valid. The `examples/` bundle was signed against the Sigsum test
+logs with throwaway keys and expires after a year; regenerate it with `demo.sh` when it does.
 
 `manifest sign` reads the enrollment (default `.well-known/webcat/enrollment.json`) and signs
 for it: a key that is not an enrolled signer or a policy that does not compile to the
