@@ -100,7 +100,10 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
         rest.keys = await ask("keys", "how many signing keys to generate now with sigsum-key (0 to use existing public keys)", "2");
       }
       if (!rest.signer && Number(rest.keys) === 0) {
-        rest.signer = (await ask("signer", "signer public keys, hex or base64, comma separated")).split(",").map((s) => s.trim()).filter(Boolean);
+        rest.signer = (await ask("signer", "signer public keys: hex, base64 or OpenSSH .pub paths (hardware keys via ssh-agent), comma separated"))
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
       }
       rest.threshold ??= await ask("threshold", "threshold (signatures required)", "1");
       rest.casUrl ??= await ask("cas-url", "cas-url (where Sigsum proofs are published)", `${origin.replace(/\/+$/, "")}/cas/`);
@@ -164,7 +167,7 @@ export async function runInit(options: InitOptions): Promise<void> {
   }
   const enrollment =
     a.type === "sigsum"
-      ? buildEnrollmentObject({
+      ? await buildEnrollmentObject({
           type: "sigsum",
           ...(await sigsumEnrollmentFromPolicy(policyText)),
           signers,
@@ -172,7 +175,7 @@ export async function runInit(options: InitOptions): Promise<void> {
           maxAge: a.maxAge,
           casUrl: a.casUrl ?? "",
         })
-      : buildEnrollmentObject({
+      : await buildEnrollmentObject({
           type: "sigstore",
           trustedRoot: await fetchCommunityTrustedRoot(),
           claims: { [SAN_OID]: a.identity ?? "", [ISSUER_V2_OID]: a.issuer ?? "" },
@@ -191,7 +194,7 @@ export async function runInit(options: InitOptions): Promise<void> {
     log(`wrote ${name}`);
   }
   const host = new URL(a.origin).host;
-  const key = keyPaths[0] ?? "<private key>";
+  const key = keyPaths[0] ?? (a.signer ?? []).find((s) => s.endsWith(".pub")) ?? "<private key, or .pub for ssh-agent>";
   const token = tokenHex ? ` --token-signing-key keys/token --token-domain ${host}` : "";
   const sign =
     a.type === "sigsum"
