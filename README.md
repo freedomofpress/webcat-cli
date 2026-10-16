@@ -338,6 +338,11 @@ npx webcat manifest sign \
   --interactive
 ```
 
+`enrollment status` reads the published list the way the extension does: it fetches
+`block.json` alongside `list.json`, verifies the block commit against the chain's validator
+set and chain id shipped with the extension, and checks the leaves prove into the block's app
+hash before reporting what the list says.
+
 For Sigstore enrollments, `enrollment status` and `site check` compare the enrollment's pinned
 trusted root with the current community root and warn when a certificate authority, log or
 timestamp authority has been added or given an end date: that is the signal to re-enroll

@@ -18,13 +18,13 @@ import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.j
 import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
-  DEFAULT_LIST_URL,
+  DEFAULT_LIST_ENDPOINT,
   WELL_KNOWN_PATH,
   type Oracle,
   bareDomain,
   enrollmentHashHex,
   fetchDomainStatus,
-  fetchListEntry,
+  fetchVerifiedList,
   fetchOracles,
   fetchServedEnrollment,
   submitObservation,
@@ -307,13 +307,13 @@ enrollment
   .description("Show a domain's enrollment as served, as recorded on the chain, and as published in the list")
   .argument("<domain>", "Domain to inspect")
   .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
-  .option("--list <url>", "Published enrollment list to check", DEFAULT_LIST_URL)
+  .option("--list <url>", "Endpoint serving the published list.json and block.json; verified like the extension does", DEFAULT_LIST_ENDPOINT)
   .option("--no-list", "Skip the published list check")
   .action(async (domain: string, options) => {
     const [served, status, list] = await Promise.all([
       fetchServedEnrollment(domain).catch((err) => err as Error),
       fetchDomainStatus(options.chainApi, domain),
-      options.list ? fetchListEntry(options.list, domain).catch((err) => err as Error) : null,
+      options.list ? fetchVerifiedList(String(options.list).replace(/list\.json$/, "")).catch((err) => err as Error) : null,
     ]);
     const show = (value: string | null | undefined) => value ?? "none";
     process.stdout.write(`Domain: ${bareDomain(domain)}\n`);
@@ -332,7 +332,9 @@ enrollment
     }
     if (list) {
       process.stdout.write(
-        list instanceof Error ? `Published list:    ERROR (${list.message})\n` : `Published list:    ${show(list.hash)} (block ${list.blockHeight})\n`,
+        list instanceof Error
+          ? `Published list:    ERROR (${list.message})\n`
+          : `Published list:    ${show(list.leaves.get(bareDomain(domain)))} (block ${list.blockHeight} at ${list.blockTime.toISOString()}, commit verified)\n`,
       );
     }
     const servedHash = served instanceof Error ? undefined : (served?.hash ?? null);
