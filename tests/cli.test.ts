@@ -487,6 +487,27 @@ describe("policy and bundle parsing", () => {
   });
 });
 
+describe("csp hints", () => {
+  it("explains each incompatibility and proposes a policy that validates", async () => {
+    const { hintCsp } = await import("../src/csp");
+    const { validateCSP } = await import("@freedomofpress/webcat/webcat/validators");
+    const { groups, suggested, accepted } = hintCsp("default-src 'self'; script-src 'self' https://cdn.example 'unsafe-inline' 'nonce-x'; style-src 'self' https://fonts.example; img-src *");
+    expect(groups.map((g) => [g.title, g.items])).toEqual([
+      ["Scripts from other origins", ["script-src https://cdn.example"]],
+      ["Inline and dynamic scripts", ["script-src 'unsafe-inline'", "script-src 'nonce-x'"]],
+      ["Stylesheets from other origins", ["style-src https://fonts.example"]],
+      ["Missing directives", ["object-src", "worker-src"]],
+    ]);
+    expect(groups[0].advice.join(" ")).toContain("sandboxed iframe");
+    expect(groups[1].advice.join(" ")).toContain("manifest signature");
+    expect(accepted.join(" ")).toContain("img-src");
+    expect(() => validateCSP(suggested)).not.toThrow();
+    expect(suggested).toContain("img-src *");
+    expect(hintCsp("default-src 'none'; script-src 'self'; style-src 'self'").groups).toEqual([]);
+    expect(hintCsp("default-src 'none', default-src 'self'").groups[0].title).toBe("Multiple policies");
+  });
+});
+
 describe("openssh public keys", () => {
   it("extracts the raw ed25519 key from an OpenSSH public key line", async () => {
     const { signerFromOpenSsh } = await import("../src/sigsum");
