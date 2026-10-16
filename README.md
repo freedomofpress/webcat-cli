@@ -127,6 +127,19 @@ go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 
 By default, these binaries will be available in `$HOME/go/bin`.
 
+## Getting started
+
+`init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
+or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
+`.well-known/webcat/enrollment.json`, and prints the next steps. Every answer is also a flag,
+so it runs unattended in CI:
+
+```sh
+npx webcat init
+npx webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
+npx webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
+```
+
 ## Enrollment helpers
 
 The `enrollment` namespace manages Sigsum or Sigstore enrollment payloads. Sigsum enrollments

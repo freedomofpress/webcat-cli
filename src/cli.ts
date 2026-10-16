@@ -13,6 +13,7 @@ import {
   scanDirectory,
 } from "./manifest.js";
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
+import { CSP_PRESETS, DEFAULT_MAX_AGE, runInit } from "./init.js";
 import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
@@ -100,19 +101,44 @@ const program = new Command()
   .configureOutput({ outputError: (str, write) => write(str.replace(/^error: /, "Error: ")) });
 
 // ---------------------------------------------------------------------------
+// init
+
+const SIGSUM = "Sigsum enrollment options:";
+const SIGSTORE = "Sigstore enrollment options:";
+
+program
+  .command("init")
+  .description("Set up a site for WEBCAT: writes webcat.config.json, trust_policy and .well-known/webcat/enrollment.json, then prints the next steps")
+  .option("--origin <url>", "Site origin, e.g. https://example.org")
+  .option("--app-version <string>", "Version string for this release (default: 1.0.0)")
+  .addOption(typeOption("Enrollment"))
+  .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
+  .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
+  .addOption(new Option("--signer <key>", "Existing Sigsum signer public key, hex or base64 (repeatable)").argParser(collect).helpGroup(SIGSUM))
+  .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
+  .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
+  .addOption(new Option("--cas-url <url>", "Where Sigsum proofs are published").helpGroup(SIGSUM))
+  .addOption(new Option("--identity <value>", "Signing identity").helpGroup(SIGSTORE))
+  .addOption(new Option("--issuer <url>", "OIDC issuer").helpGroup(SIGSTORE))
+  .option("-d, --dir <path>", "Directory to write into", ".")
+  .action(async (options) => {
+    // --type has a default, so leave it unset for the prompt unless given explicitly.
+    const type = program.commands.find((c) => c.name() === "init")!.getOptionValueSource("type") === "cli" ? options.type : undefined;
+    await runInit({ ...options, version: options.appVersion, type, csp: options.csp && (CSP_PRESETS[options.csp]?.csp ?? options.csp) });
+  });
+
+// ---------------------------------------------------------------------------
 // enrollment
 
 const enrollment = program.command("enrollment").description("Create, canonicalize and hash enrollments");
 
-const SIGSUM = "Sigsum enrollment options:";
-const SIGSTORE = "Sigstore enrollment options:";
 const enrollmentCreate = enrollment
   .command("create")
   .description("Create an enrollment definition")
   .addOption(typeOption("Enrollment"))
   .option("-m, --max-age <seconds>", "Maximum age in seconds")
   .option("-o, --output <path>", "Write result to file instead of stdout")
-  .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").helpGroup(SIGSUM))
+  .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
   .addOption(new Option("-s, --signer <key>", "Signer public key, hex or base64 (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
   .addOption(new Option("-c, --cas-url <url>", "CAS https URL").helpGroup(SIGSUM))
@@ -296,9 +322,9 @@ manifest
   .command("generate")
   .description("Generate a manifest from a directory and config")
   .addOption(typeOption("Manifest"))
-  .requiredOption("-c, --config <path>", "Manifest config JSON file")
+  .option("-c, --config <path>", "Manifest config JSON file", "webcat.config.json")
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
-  .option("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("-p, --policy-file <path>", "Sigsum policy file for timestamps", "trust_policy")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
@@ -317,8 +343,8 @@ manifest
   .command("sign")
   .description("Sign a manifest with sigsum (default) or sigstore")
   .addOption(typeOption("Signature"))
-  .requiredOption("-i, --input <path>", "Manifest file to sign")
-  .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
+  .option("-i, --input <path>", "Manifest file to sign", "manifest.json")
+  .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit", "trust_policy")
   .option("-k, --key <path>", "Sigsum private key for signing")
   .option("--token-signing-key <path>", "Sigsum private key for token signing")
   .option("--token-domain <domain>", "Domain name to use for Sigsum rate limiting")
@@ -470,8 +496,8 @@ program
   .description("Combine an enrollment and a signed manifest into a bundle")
   .command("create")
   .description("Create a bundle from enrollment and a signed manifest")
-  .requiredOption("-e, --enrollment <path>", "Enrollment JSON file")
-  .requiredOption("-m, --manifest <path>", "Signed manifest JSON file")
+  .option("-e, --enrollment <path>", "Enrollment JSON file", ".well-known/webcat/enrollment.json")
+  .option("-m, --manifest <path>", "Signed manifest JSON file", "manifest.signed.json")
   .option("-o, --output <path>", "Write bundle JSON to a file")
   .action(async (options) => {
     const [enrollment, document] = await Promise.all([loadEnrollment(options.enrollment), loadManifestDocument(options.manifest)]);

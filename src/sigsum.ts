@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parsePolicyText } from "@freedomofpress/sigsum/dist/config.js";
@@ -41,6 +41,16 @@ function runSigsum(binary: string, args: string[], stdio: "pipe" | "inherit"): P
       }
     });
   });
+}
+
+// Generates keys/key1..keyN with sigsum-key and returns their public keys as enrollment signers.
+export async function generateSigsumKeys(dir: string, count: number): Promise<{ paths: string[]; signers: string[] }> {
+  await mkdir(path.join(dir, "keys"), { recursive: true });
+  const paths = Array.from({ length: count }, (_, i) => path.join(dir, "keys", `key${i + 1}`));
+  for (const keyPath of paths) {
+    await runSigsum("sigsum-key", ["generate", "-o", keyPath], "pipe");
+  }
+  return { paths, signers: await Promise.all(paths.map(deriveSignerKeyFromPrivateKey)) };
 }
 
 export async function deriveSignerKeyFromPrivateKey(privKeyPath: string): Promise<string> {
