@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
+import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
 import { publishSigsumProofToCas, writeCasObject } from "./cas.js";
 import {
@@ -49,6 +50,7 @@ import {
 import {
   CliError,
   OID_RE,
+  causeOf,
   describeWebcatError,
   ensureObject,
   external,
@@ -135,6 +137,25 @@ program
       maxAge: explicit("maxAge"),
       csp: options.csp && (CSP_PRESETS[options.csp]?.csp ?? options.csp),
     });
+  });
+
+// ---------------------------------------------------------------------------
+// csp
+
+program
+  .command("csp")
+  .description("Content Security Policy helpers")
+  .command("check")
+  .description("Answer whether a policy satisfies WEBCAT's CSP rules (exit 1 if not)")
+  .argument("<policy>", "The policy string, quoted")
+  .action((policy: string) => {
+    try {
+      validateCSP(policy);
+      process.stdout.write("OK: WEBCAT-compatible\n");
+    } catch (err) {
+      process.stdout.write(`NOT OK: ${causeOf(err)}\n`);
+      process.exitCode = 1;
+    }
   });
 
 // ---------------------------------------------------------------------------
