@@ -119,7 +119,7 @@ program
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
   .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
   .addOption(new Option("--policy <choice>", `Sigsum policy: ${Object.keys(SIGSUM_POLICIES).join(", ")}, or a policy file path`).helpGroup(SIGSUM))
-  .addOption(new Option("--signer <key>", "Existing Sigsum signer public key, hex or base64 (repeatable)").argParser(collect).helpGroup(SIGSUM))
+  .addOption(new Option("--signer <key>", "Existing signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
   .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
   .addOption(new Option("--cas-url <url>", "Where Sigsum proofs are published").helpGroup(SIGSUM))
@@ -170,7 +170,7 @@ const enrollmentCreate = enrollment
   .option("-m, --max-age <seconds>", "Maximum age in seconds")
   .option("-o, --output <path>", "Write result to file instead of stdout")
   .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
-  .addOption(new Option("-s, --signer <key>", "Signer public key, hex or base64 (repeatable)").argParser(collect).helpGroup(SIGSUM))
+  .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
   .addOption(new Option("-c, --cas-url <url>", "CAS https URL").helpGroup(SIGSUM))
   .addOption(new Option("--trusted-root <path>", "Sigstore trusted root file").helpGroup(SIGSTORE))
@@ -197,7 +197,7 @@ enrollmentCreate.action(async (options) => {
       [options.casUrl, "--cas-url"],
     );
     const policyText = await readText(options.policyFile, "policy");
-    enrollmentObject = buildEnrollmentObject({
+    enrollmentObject = await buildEnrollmentObject({
       type: "sigsum",
       ...(await sigsumEnrollmentFromPolicy(policyText)),
       signers: options.signer,
@@ -233,7 +233,7 @@ enrollmentCreate.action(async (options) => {
     const trustedRoot = options.communityTrustedRoot
       ? await fetchCommunityTrustedRoot()
       : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`);
-    enrollmentObject = buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
+    enrollmentObject = await buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
   const json = JSON.stringify(enrollmentObject, null, 2);
@@ -382,8 +382,8 @@ manifest
   .option("-i, --input <path>", "Manifest file to sign", "manifest.json")
   .option("-e, --enrollment <path>", "Enrollment to sign for: refuses keys or policies it would not accept and verifies the result", ".well-known/webcat/enrollment.json")
   .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit", "trust_policy")
-  .option("-k, --key <path>", "Sigsum private key for signing")
-  .option("--token-signing-key <path>", "Sigsum private key for token signing")
+  .option("-k, --key <path>", "Sigsum signing key: a private key file, or a .pub whose private key is in ssh-agent (hardware tokens)")
+  .option("--token-signing-key <path>", "Rate-limit token key: a private key file, or a .pub held in ssh-agent")
   .option("--token-domain <domain>", "Domain name to use for Sigsum rate limiting")
   .addOption(new Option("--bundle-type <type>", "Sigstore bundle type to generate").choices(["message", "dsse"]).default("message"))
   .option("--fulcio-url <url>", "Sigstore Fulcio base URL", DEFAULT_FULCIO_URL)

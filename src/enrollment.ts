@@ -33,18 +33,19 @@ export { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreE
 
 export const parseSignerKey = (value: string): string => toBase64Url(decodeKeyMaterial(value, "--signer"));
 
-// CLI-flag shape (camelCase, signer keys in any encoding) -> validated enrollment.
-export function buildEnrollmentObject(
+// CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated enrollment.
+export async function buildEnrollmentObject(
   o:
     | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; casUrl: string; logs?: Record<string, string> }
     | { type: "sigstore"; trustedRoot: unknown; claims: unknown; maxAge: number | string },
-): Enrollment {
+): Promise<Enrollment> {
   const max_age = parseInteger(o.maxAge, "--max-age");
-  return parseEnrollmentObject(
-    o.type === "sigstore"
-      ? { type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }
-      : { type: "sigsum", policy: o.policy, signers: o.signers.map(parseSignerKey), threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs },
-  );
+  if (o.type === "sigstore") {
+    return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age });
+  }
+  const { signerFromValue } = await import("./sigsum.js"); // sigsum.ts imports this module; resolve lazily
+  const signers = await Promise.all(o.signers.map(signerFromValue));
+  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs });
 }
 
 // The extension's validators decide what an enrollment is. The CLI only adds authoring guards the

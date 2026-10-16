@@ -7,7 +7,7 @@ import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler.js";
 import { SigsumProof } from "@freedomofpress/sigsum/dist/proof.js";
 import { Hash, Leaf } from "@freedomofpress/sigsum/dist/types.js";
 import { witnessTimestampsFromCosignedTreeHead } from "@freedomofpress/webcat/webcat/validators";
-import type { SigsumEnrollment } from "./enrollment.js";
+import { type SigsumEnrollment, parseSignerKey } from "./enrollment.js";
 import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
 import { causeOf, external, hexToBase64Url, invalid, sha256, toBase64Url, validateAll } from "./utils.js";
 
@@ -62,8 +62,23 @@ export async function generateSigsumKeys(dir: string, count: number): Promise<{ 
   return { paths, signers: await Promise.all(paths.map(deriveSignerKeyFromPrivateKey)) };
 }
 
-export async function deriveSignerKeyFromPrivateKey(privKeyPath: string): Promise<string> {
-  const pubPath = `${privKeyPath}.pub`;
+// The raw 32-byte key inside an OpenSSH "ssh-ed25519 <base64> comment" line, as a base64url enrollment signer.
+export function signerFromOpenSsh(line: string): string {
+  const [type, blob] = line.trim().split(/\s+/);
+  const raw = type === "ssh-ed25519" && blob ? Buffer.from(blob, "base64") : Buffer.alloc(0);
+  if (raw.length !== 51) {
+    throw invalid(`expected an OpenSSH ed25519 public key line, got '${line.trim().slice(0, 40)}'`);
+  }
+  return toBase64Url(raw.subarray(-32)); // string "ssh-ed25519" + 32-byte key, both length-prefixed
+}
+
+// --signer values: hex, base64, or the path of an OpenSSH .pub file (e.g. a hardware key reachable through ssh-agent).
+export const signerFromValue = async (value: string): Promise<string> =>
+  value.endsWith(".pub") ? signerFromOpenSsh(await readFile(value, "utf8")) : parseSignerKey(value);
+
+// A key file for sigsum-submit: a private key, or a public key whose private part lives in ssh-agent (hardware tokens).
+export async function deriveSignerKeyFromPrivateKey(keyPath: string): Promise<string> {
+  const pubPath = keyPath.endsWith(".pub") ? keyPath : `${keyPath}.pub`;
   const hex = await runSigsum("sigsum-key", ["to-hex", "-k", pubPath], "pipe");
   if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
     throw external(`failed to run sigsum-key: expected a hex public key for ${pubPath}, got '${hex}'`);

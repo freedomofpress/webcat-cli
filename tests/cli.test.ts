@@ -88,8 +88,8 @@ describe("enrollment helpers", () => {
   const baseSigner = "aa".repeat(32);
   const secondSigner = "bb".repeat(32);
 
-  it("builds normalized enrollment objects", () => {
-    const enrollment = buildEnrollmentObject({
+  it("builds normalized enrollment objects", async () => {
+    const enrollment = await buildEnrollmentObject({
       type: "sigsum",
       policy: real.policy,
       signers: [baseSigner],
@@ -108,8 +108,8 @@ describe("enrollment helpers", () => {
     expect(enrollment.max_age).toBe(1_000_000);
   });
 
-  it("rejects duplicate or insufficient signer information", () => {
-    expect(() =>
+  it("rejects duplicate or insufficient signer information", async () => {
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
         policy: real.policy,
@@ -119,9 +119,9 @@ describe("enrollment helpers", () => {
         casUrl: "https://example.com",
         logs: real.logs,
       }),
-    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
+    ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
         policy: real.policy,
@@ -131,9 +131,9 @@ describe("enrollment helpers", () => {
         casUrl: "https://example.com",
         logs: real.logs,
       }),
-    ).toThrow("enrollment.signers must not contain duplicates");
+    ).rejects.toThrow("enrollment.signers must not contain duplicates");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
         policy: real.policy,
@@ -143,9 +143,9 @@ describe("enrollment helpers", () => {
         casUrl: "https://example.com",
         logs: real.logs,
       }),
-    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
+    ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
         policy: real.policy,
@@ -155,9 +155,9 @@ describe("enrollment helpers", () => {
         casUrl: "https://example.com",
         logs: real.logs,
       }),
-    ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
+    ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
-    expect(() =>
+    await expect(
       buildEnrollmentObject({
         type: "sigsum",
         policy: real.policy,
@@ -167,12 +167,12 @@ describe("enrollment helpers", () => {
         casUrl: "http://example.com",
         logs: real.logs,
       }),
-    ).toThrow("enrollment.cas_url must use https://");
+    ).rejects.toThrow("enrollment.cas_url must use https://");
   });
 
-  it("builds sigstore enrollment objects", () => {
+  it("builds sigstore enrollment objects", async () => {
     const trustedRoot = { fulcio: { root: "data" } };
-    const enrollment = buildEnrollmentObject({
+    const enrollment = await buildEnrollmentObject({
       type: "sigstore",
       trustedRoot,
       claims: {
@@ -484,6 +484,14 @@ describe("policy and bundle parsing", () => {
     await expect(loadBundleDocument(bundlePath)).rejects.toThrow("bundle.manifest is required");
 
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("openssh public keys", () => {
+  it("extracts the raw ed25519 key from an OpenSSH public key line", async () => {
+    const { signerFromOpenSsh } = await import("../src/sigsum");
+    expect(signerFromOpenSsh("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKTjWh18iv9sSOg18yWXS1IepFJclk9Aq5XRRfPL2Iq0 hw-sim")).toBe(hexToBase64Url("a4e35a1d7c8aff6c48e835f325974b521ea4525c964f40ab95d145f3cbd88ab4"));
+    expect(() => signerFromOpenSsh("ssh-rsa AAAA")).toThrow("expected an OpenSSH ed25519 public key line");
   });
 });
 

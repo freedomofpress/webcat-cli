@@ -161,6 +161,14 @@ Production logs rate-limit submissions per domain: `init` generates `keys/token`
 the `_sigsum_v1.<domain>` TXT record to publish, and the `manifest sign` flags that use it
 (`--token-signing-key keys/token --token-domain <domain>`).
 
+### Hardware keys and ssh-agent
+
+`sigsum-submit` signs through the SSH agent when it is given a public key instead of a private
+one, which is how YubiKeys and other tokens holding an ed25519 key are used. Pass the `.pub`
+everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
+`manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
+ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
+
 ### Content-addressable storage (`cas_url`)
 
 A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes three objects under `./cas/`,
