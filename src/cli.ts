@@ -57,6 +57,7 @@ import {
   readText,
   sha256,
   toBase64Url,
+  validateAll,
   withConsoleOnStderr,
   writeOutput,
 } from "./utils.js";
@@ -73,6 +74,9 @@ function requireOption<T>(value: T | undefined, flag: string, context: string): 
   }
   return value;
 }
+// Reports every missing flag at once.
+const requireOptions = (context: string, ...flags: Array<[value: unknown, flag: string]>): void =>
+  validateAll(flags.map(([value, flag]) => () => requireOption(value, flag, context)));
 
 function parseClaim(value: string, previous: Record<string, string> = {}): Record<string, string> {
   const separator = value.indexOf("=");
@@ -129,22 +133,24 @@ for (const [flag, oid] of SIGSTORE_CLAIM_FLAGS) {
 enrollmentCreate.action(async (options) => {
   let enrollmentObject: Enrollment;
   if (options.type === "sigsum") {
-    const policyText = await readText(requireOption(options.policyFile, "--policy-file", "sigsum enrollments"), "policy");
+    requireOptions(
+      "sigsum enrollments",
+      [options.policyFile, "--policy-file"],
+      [options.signer, "--signer"],
+      [options.threshold, "--threshold"],
+      [options.maxAge, "--max-age"],
+      [options.casUrl, "--cas-url"],
+    );
+    const policyText = await readText(options.policyFile, "policy");
     enrollmentObject = buildEnrollmentObject({
       type: "sigsum",
       ...(await sigsumEnrollmentFromPolicy(policyText)),
-      signers: options.signer ?? [],
-      threshold: requireOption(options.threshold, "--threshold", "sigsum enrollments"),
-      maxAge: requireOption(options.maxAge, "--max-age", "sigsum enrollments"),
-      casUrl: requireOption(options.casUrl, "--cas-url", "sigsum enrollments"),
+      signers: options.signer,
+      threshold: options.threshold,
+      maxAge: options.maxAge,
+      casUrl: options.casUrl,
     });
   } else {
-    if (options.communityTrustedRoot && options.trustedRoot) {
-      throw invalid("--trusted-root and --community-trusted-root are mutually exclusive");
-    }
-    if (!options.communityTrustedRoot && !options.trustedRoot) {
-      throw invalid("--trusted-root or --community-trusted-root is required for sigstore enrollments");
-    }
     // Explicit --claim first, then legacy aliases, then named flags; later entries win per OID.
     const claims: Record<string, string> = { ...(options.claim ?? {}) };
     if (options.identity) claims[SAN_OID] = options.identity.trim();
@@ -153,18 +159,26 @@ enrollmentCreate.action(async (options) => {
       const value = options[camel(flag)];
       if (value) claims[oid] = String(value).trim();
     }
-    if (Object.keys(claims).length === 0) {
-      throw invalid("--identity, --issuer or --claim is required for sigstore enrollments");
-    }
+    validateAll([
+      () => {
+        if (options.communityTrustedRoot && options.trustedRoot) {
+          throw invalid("--trusted-root and --community-trusted-root are mutually exclusive");
+        }
+        if (!options.communityTrustedRoot && !options.trustedRoot) {
+          throw invalid("--trusted-root or --community-trusted-root is required for sigstore enrollments");
+        }
+      },
+      () => {
+        if (Object.keys(claims).length === 0) {
+          throw invalid("--identity, --issuer or --claim is required for sigstore enrollments");
+        }
+      },
+      () => requireOption(options.maxAge, "--max-age", "sigstore enrollments"),
+    ]);
     const trustedRoot = options.communityTrustedRoot
       ? await fetchCommunityTrustedRoot()
       : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`);
-    enrollmentObject = buildEnrollmentObject({
-      type: "sigstore",
-      trustedRoot,
-      claims,
-      maxAge: requireOption(options.maxAge, "--max-age", "sigstore enrollments"),
-    });
+    enrollmentObject = buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
   const json = JSON.stringify(enrollmentObject, null, 2);
@@ -326,9 +340,10 @@ manifest
     const document = await loadManifestDocument(options.input);
 
     if (options.type === "sigsum") {
+      requireOptions("sigsum signing", [options.policyFile, "--policy-file"], [options.key, "--key"]);
       const proofText = await signManifestWithSigsum(document, {
-        policyFile: requireOption(options.policyFile, "--policy-file", "sigsum signing"),
-        key: requireOption(options.key, "--key", "sigsum signing"),
+        policyFile: options.policyFile,
+        key: options.key,
         tokenSigningKey: options.tokenSigningKey,
         tokenDomain: options.tokenDomain,
       });

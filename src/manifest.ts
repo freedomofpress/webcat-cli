@@ -4,7 +4,7 @@ import type { SerializedBundle } from "@sigstore/bundle";
 import type { Manifest, SigsumSignatures } from "@freedomofpress/webcat/webcat/interfaces/bundle";
 import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateCSP, validateManifest } from "@freedomofpress/webcat/webcat/validators";
-import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url } from "./utils.js";
+import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url, validateAll } from "./utils.js";
 
 // The CLI writes `app` where the library's interface says `name`; the extension reads neither.
 export type ManifestContent = Omit<Manifest, "name"> & { app: string };
@@ -36,15 +36,17 @@ const isRecordOfStrings = (value: unknown): value is Record<string, string> =>
 
 // Everything the extension checks on a manifest, plus its CSP rules on every policy string.
 export function validateManifestContent(manifest: ManifestContent, subject = "manifest"): void {
-  check(validateManifest(asLibraryManifest(manifest)), subject);
-  const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp).map(([k, v]) => [`extra_csp['${k}']`, v])];
-  for (const [field, csp] of policies) {
-    try {
-      validateCSP(csp);
-    } catch (err) {
-      throw invalid(`${subject}.${field} must be a WEBCAT-compatible CSP: ${causeOf(err)}`);
-    }
-  }
+  const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp ?? {}).map(([k, v]) => [`extra_csp['${k}']`, v])];
+  validateAll([
+    () => check(validateManifest(asLibraryManifest(manifest)), subject),
+    ...policies.map(([field, csp]) => () => {
+      try {
+        validateCSP(csp);
+      } catch (err) {
+        throw invalid(`${subject}.${field} must be a WEBCAT-compatible CSP: ${causeOf(err)}`);
+      }
+    }),
+  ]);
 }
 
 export async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
@@ -55,19 +57,28 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     }
     return c[key] as string;
   };
-  try {
-    new URL(str("app"));
-  } catch (err) {
-    throw invalid(`config.app must be a valid URL: ${causeOf(err)}`);
-  }
   const wasm = c.wasm ?? [];
-  if (!Array.isArray(wasm) || !wasm.every((w) => typeof w === "string")) {
-    throw invalid("config.wasm must be an array of strings");
-  }
   const extra_csp = c.extra_csp ?? {};
-  if (!isRecordOfStrings(extra_csp) || Object.keys(extra_csp).some((k) => !k.startsWith("/"))) {
-    throw invalid("config.extra_csp must map '/'-prefixed path prefixes to CSP strings");
-  }
+  validateAll([
+    () => {
+      try {
+        new URL(str("app"));
+      } catch (err) {
+        throw invalid(`config.app must be a valid URL: ${causeOf(err)}`);
+      }
+    },
+    ...["version", "default_csp", "default_index", "default_fallback"].map((key) => () => str(key)),
+    () => {
+      if (!Array.isArray(wasm) || !wasm.every((w) => typeof w === "string")) {
+        throw invalid("config.wasm must be an array of strings");
+      }
+    },
+    () => {
+      if (!isRecordOfStrings(extra_csp) || Object.keys(extra_csp).some((k) => !k.startsWith("/"))) {
+        throw invalid("config.extra_csp must map '/'-prefixed path prefixes to CSP strings");
+      }
+    },
+  ]);
   // CSP, index and fallback are checked with the extension's rules once the manifest is built.
   return {
     app: str("app"),
@@ -75,8 +86,8 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
     default_fallback: str("default_fallback"),
-    wasm,
-    extra_csp,
+    wasm: wasm as string[],
+    extra_csp: extra_csp as Record<string, string>,
   };
 }
 

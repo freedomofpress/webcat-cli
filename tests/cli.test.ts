@@ -333,6 +333,9 @@ describe("manifest configuration", () => {
     expect(() => buildManifest({ ...config, default_fallback: "/missing.html" }, scan)).toThrow("config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE");
     expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
+    expect(() => buildManifest({ ...config, default_fallback: "/missing.html", default_csp: "default-src 'self'", extra_csp: { "/a": "csp" } }, scan)).toThrow(
+      /3 problems:\n  - config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE\n  - config.default_csp must be .*\n  - config.extra_csp\['\/a'\] must be/,
+    );
   });
 });
 

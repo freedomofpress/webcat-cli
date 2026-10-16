@@ -21,6 +21,28 @@ export const external = (message: string): CliError => new CliError(message, 3);
 export const causeOf = (err: unknown): string =>
   err instanceof Error ? (err.cause instanceof Error ? `${err.message}: ${err.cause.message}` : err.message) : String(err);
 
+// Runs every check and reports all invalid-input problems together, instead of one per run.
+// Anything other than an exit-2 error propagates immediately.
+export function validateAll(checks: Array<() => unknown>): void {
+  const problems: string[] = [];
+  for (const run of checks) {
+    try {
+      run();
+    } catch (err) {
+      if (!(err instanceof CliError) || err.exitCode !== 2) {
+        throw err;
+      }
+      problems.push(err.message);
+    }
+  }
+  if (problems.length === 1) {
+    throw invalid(problems[0]);
+  }
+  if (problems.length > 1) {
+    throw invalid(`${problems.length} problems:\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
 // Validation itself comes from @freedomofpress/webcat, the extension's own validators, so the CLI
 // accepts exactly what browsers accept. Its errors carry a code (ERR_WEBCAT_...) plus details.
 export const describeWebcatError = (err: WebcatError): string => (err.details?.length ? `${err.code} (${err.details.join(", ")})` : err.code);
