@@ -1,7 +1,33 @@
 import { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
 import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
-import { OID_RE, check, decodeKeyMaterial, ensureObject, invalid, parseInteger, readJson, toBase64Url, validateAll, validateCasUrl, validateMaxAge } from "./utils.js";
+import { parseCompiledPolicy } from "@freedomofpress/sigsum/dist/compiledPolicy.js";
+import {
+  OID_RE,
+  causeOf,
+  check,
+  decodeKeyMaterial,
+  ensureObject,
+  invalid,
+  parseInteger,
+  readJson,
+  toBase64Url,
+  validateAll,
+  validateCasUrl,
+  validateMaxAge,
+} from "./utils.js";
+
+// Log keys inside a compiled policy, base64url like the keys of enrollment.logs; an Error when the policy does not parse.
+function compiledPolicyLogs(policy: unknown): string[] | Error {
+  if (typeof policy !== "string" || policy.length === 0) {
+    return []; // the library reports the malformed policy itself
+  }
+  try {
+    return parseCompiledPolicy(new Uint8Array(Buffer.from(policy, "base64url"))).logsRaw.map(toBase64Url);
+  } catch (err) {
+    return err instanceof Error ? err : new Error(String(err));
+  }
+}
 
 export { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment };
 
@@ -44,8 +70,33 @@ export function parseEnrollmentObject(parsed: unknown): Enrollment {
   }
   const enrollment = { ...e, type } as SigsumEnrollment;
   const signers = Array.isArray(enrollment.signers) ? enrollment.signers : [];
+  // The compiled policy is what browsers enforce; enrollment.logs only tells auditors where those logs live. Keep them in step.
+  const policyLogs = compiledPolicyLogs(enrollment.policy);
+  const listedLogs = typeof enrollment.logs === "object" && enrollment.logs !== null ? Object.entries(enrollment.logs) : [];
   validateAll([
     () => check(validateSigsumEnrollment(enrollment), "enrollment"),
+    () => {
+      if (policyLogs instanceof Error) {
+        throw invalid(`enrollment.policy must be a compiled Sigsum policy: ${causeOf(policyLogs)}`);
+      }
+    },
+    ...(Array.isArray(policyLogs)
+      ? policyLogs
+          .filter((key) => !listedLogs.some(([k]) => k === key))
+          .map((key) => () => {
+            throw invalid(`enrollment.logs must give the URL of log ${key}, which the policy trusts`);
+          })
+      : []),
+    ...listedLogs.map(([key, url]) => () => {
+      if (Array.isArray(policyLogs) && !policyLogs.includes(key)) {
+        throw invalid(`enrollment.logs lists ${key}, which is not a log in the policy`);
+      }
+      try {
+        new URL(String(url));
+      } catch (err) {
+        throw invalid(`enrollment.logs[${key}] must be a URL: ${causeOf(err)}`);
+      }
+    }),
     ...signers.map((signer, i) => () => decodeKeyMaterial(String(signer), `enrollment.signers[${i}]`)),
     () => {
       if (new Set(signers).size !== signers.length) {

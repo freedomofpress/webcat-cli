@@ -5,7 +5,9 @@ import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type BundleDocument, describeValidity, parseBundleObject, verifyBundle } from "./bundle.js";
 import { bareDomain, enrollmentHashHex, fetchDomainStatus, fetchServedEnrollment } from "./chain.js";
+import { EnrollmentTypes } from "./enrollment.js";
 import type { ManifestContent } from "./manifest.js";
+import { fetchCommunityTrustedRoot, trustedRootDrift } from "./sigstore.js";
 import { causeOf, describeWebcatError, external, sha256, toBase64Url } from "./utils.js";
 
 export interface PathCheck {
@@ -17,6 +19,7 @@ export interface SiteReport {
   bundle: string;
   previousBundle: string;
   enrollment: string;
+  trustedRoot: string[]; // drift lines for Sigstore enrollments, empty when up to date or not applicable
   paths: PathCheck[];
 }
 
@@ -171,10 +174,13 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
               : `MISMATCH: bundle and enrollment.json agree (${bundleHash}) but the chain records ${status.canonical ?? "none"}`;
   const manifest = current.bundle.manifest.manifest;
   const paths = options.paths?.length ? options.paths : ["/", ...Object.keys(manifest.files)];
+  const trustedRoot =
+    current.bundle.enrollment.type === EnrollmentTypes.Sigstore ? trustedRootDrift(current.bundle.enrollment.trusted_root, await fetchCommunityTrustedRoot()) : [];
   return {
     bundle: current.verdict,
     previousBundle: previous ? previous.verdict : "none",
     enrollment,
+    trustedRoot,
     paths: await mapLimit(paths, 8, (p) => checkPath(origin, manifest, p)),
   };
 }

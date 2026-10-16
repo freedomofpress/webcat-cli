@@ -53,6 +53,54 @@ export const SIGSTORE_CLAIM_FLAGS: ReadonlyArray<readonly [flag: string, oid: st
   ["deployment-environment", "1.3.6.1.4.1.57264.1.23"],
 ];
 
+// What the community root has that a pinned enrollment root lacks: each line is a reason a re-enrollment is coming.
+// Logs are identified by public key, CAs and TSAs by their leaf certificate.
+export function trustedRootDrift(pinned: any, community: any): string[] {
+  const kinds: Array<[field: string, kind: string, id: (e: any) => string, label: (e: any) => string, validFor: (e: any) => any]> = [
+    ["certificateAuthorities", "certificate authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
+    ["tlogs", "transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
+    ["ctlogs", "certificate transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
+    ["timestampAuthorities", "timestamp authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
+  ];
+  const drift: string[] = [];
+  for (const [field, kind, id, label, validFor] of kinds) {
+    const mine = new Map<string, any>((pinned?.[field] ?? []).map((e: any) => [id(e), e]));
+    for (const entry of community?.[field] ?? []) {
+      const pinnedEntry = mine.get(id(entry));
+      if (!pinnedEntry) {
+        drift.push(`new ${kind} ${label(entry)} (valid from ${validFor(entry)?.start ?? "?"}) is not in the enrollment's trusted root`);
+      } else if (validFor(entry)?.end && !validFor(pinnedEntry)?.end) {
+        drift.push(`${kind} ${label(entry)} ends on ${validFor(entry).end} in the community root`);
+      }
+    }
+  }
+  return drift;
+}
+
+// Drift that stops signing: for a service kind the signer relies on, none of the community root's currently
+// valid entries is in the pinned root, so nothing issued today can verify under the enrollment.
+export function signingBlockedBy(pinned: any, community: any, now = new Date()): string[] {
+  const kinds: Array<[field: string, kind: string, id: (e: any) => string, validFor: (e: any) => any]> = [
+    ["certificateAuthorities", "certificate authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.validFor],
+    ["tlogs", "transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.publicKey?.validFor],
+    ["ctlogs", "certificate transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.publicKey?.validFor],
+    ["timestampAuthorities", "timestamp authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.validFor],
+  ];
+  const active = (v: any) => (!v?.start || new Date(v.start) <= now) && (!v?.end || new Date(v.end) > now);
+  const blocked: string[] = [];
+  for (const [field, kind, id, validFor] of kinds) {
+    const current = (community?.[field] ?? []).filter((e: any) => active(validFor(e)));
+    const pinnedIds = new Set((pinned?.[field] ?? []).map(id));
+    if (current.length === 0 || pinnedIds.size === 0) {
+      continue; // the enrollment never relied on this kind (e.g. no TSA), or the public instance has none right now
+    }
+    if (!current.some((e: any) => pinnedIds.has(id(e)))) {
+      blocked.push(`no currently valid ${kind} in the community root is in the enrollment's trusted root`);
+    }
+  }
+  return blocked;
+}
+
 export async function fetchCommunityTrustedRoot(): Promise<Record<string, unknown>> {
   const provider = new TrustedRootProvider({ disableCache: true });
   const root = await provider.getTrustedRoot().catch((err) => {

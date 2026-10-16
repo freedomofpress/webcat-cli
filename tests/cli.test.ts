@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
 import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
 import { loadBundleDocument } from "../src/bundle";
+import { SIGSUM_TEST_POLICY } from "../src/init";
+import { sigsumEnrollmentFromPolicy } from "../src/sigsum";
 import { parseListLeaves, solvePow, toFqdn } from "../src/chain";
 import { writeCasObject } from "../src/cas";
 import {
@@ -80,6 +82,8 @@ describe("integer and range validation", () => {
   });
 });
 
+const real = await sigsumEnrollmentFromPolicy(SIGSUM_TEST_POLICY); // a genuine compiled policy plus its logs map
+
 describe("enrollment helpers", () => {
   const baseSigner = "aa".repeat(32);
   const secondSigner = "bb".repeat(32);
@@ -87,12 +91,12 @@ describe("enrollment helpers", () => {
   it("builds normalized enrollment objects", () => {
     const enrollment = buildEnrollmentObject({
       type: "sigsum",
-      policy: "policy-bytes",
+      policy: real.policy,
       signers: [baseSigner],
       threshold: 1,
       maxAge: 1_000_000,
       casUrl: "https://example.com",
-      logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+      logs: real.logs,
     });
 
     expect(enrollment.type).toBe("sigsum");
@@ -108,60 +112,60 @@ describe("enrollment helpers", () => {
     expect(() =>
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [],
         threshold: 1,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
 
     expect(() =>
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner, baseSigner],
         threshold: 1,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment.signers must not contain duplicates");
 
     expect(() =>
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner, secondSigner],
         threshold: 3,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
 
     expect(() =>
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner],
         threshold: 0,
         maxAge: 1_000_000,
         casUrl: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
     expect(() =>
       buildEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [baseSigner],
         threshold: 1,
         maxAge: 60 * 60 * 24 * 8,
         casUrl: "http://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment.cas_url must use https://");
   });
@@ -196,12 +200,12 @@ describe("enrollment helpers", () => {
       file,
       JSON.stringify({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [hexToBase64Url(baseSigner)],
         threshold: 1,
         max_age: 1_000_000,
         cas_url: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     );
 
@@ -227,19 +231,19 @@ describe("enrollment helpers", () => {
         threshold: 1,
         max_age: 1,
         cas_url: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_POLICY_LENGTH");
 
     expect(() =>
       parseEnrollmentObject({
         type: "sigsum",
-        policy: "policy",
+        policy: real.policy,
         signers: [hexToBase64Url(baseSigner), hexToBase64Url(baseSigner)],
         threshold: 1,
         max_age: 1_000_000,
         cas_url: "https://example.com",
-        logs: { "4jFUdrXpAfvfRSCxhR5nfwQXlT7YjLiQ_v1Iz9ZwYCk": "https://log.example" },
+        logs: real.logs,
       }),
     ).toThrow("enrollment.signers must not contain duplicates");
 
@@ -251,6 +255,12 @@ describe("enrollment helpers", () => {
         max_age: 1_000_000,
       }),
     ).toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_TRUSTED_ROOT_MISSING");
+
+    const base = { type: "sigsum", policy: real.policy, signers: [hexToBase64Url(baseSigner)], threshold: 1, max_age: 1_000_000, cas_url: "https://example.com" };
+    expect(() => parseEnrollmentObject({ ...base, logs: { ...real.logs, AAAA: "https://other.example" } })).toThrow("enrollment.logs lists AAAA, which is not a log in the policy");
+    expect(() => parseEnrollmentObject({ ...base, logs: { AAAA: "https://other.example" } })).toThrow(/enrollment.logs must give the URL of log \S+, which the policy trusts/);
+    expect(() => parseEnrollmentObject({ ...base, policy: "bm90LWEtcG9saWN5", logs: real.logs })).toThrow("enrollment.policy must be a compiled Sigsum policy");
+    expect(() => parseEnrollmentObject({ ...base, logs: real.logs })).not.toThrow();
 
     expect(() =>
       parseEnrollmentObject({
@@ -431,7 +441,7 @@ describe("policy and bundle parsing", () => {
       bundlePath,
       JSON.stringify({
         enrollment: {
-          policy: "policy",
+          policy: real.policy,
           signers: [""],
           threshold: 1,
           max_age: 1_000_000,
@@ -461,7 +471,7 @@ describe("policy and bundle parsing", () => {
       bundlePath,
       JSON.stringify({
         enrollment: {
-          policy: "policy",
+          policy: real.policy,
           signers: ["abc"],
           threshold: 1,
           max_age: 1_000_000,
@@ -489,6 +499,30 @@ describe("init", () => {
     expect(enrollment.type).toBe("sigsum");
     expect(await readFile(path.join(dir, "trust_policy"), "utf8")).toContain("quorum");
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("trusted root drift", () => {
+  it("reports new entries and newly ended ones", async () => {
+    const { trustedRootDrift } = await import("../src/sigstore");
+    const ca = (leaf: string, uri: string, validFor: any) => ({ uri, certChain: { certificates: [{ rawBytes: leaf }] }, validFor });
+    const tlog = (key: string, baseUrl: string, validFor: any) => ({ baseUrl, publicKey: { rawBytes: key, validFor } });
+    const pinned = { certificateAuthorities: [ca("A", "https://fulcio", { start: "2022" })], tlogs: [tlog("K1", "https://rekor", { start: "2021" })] };
+    const community = {
+      certificateAuthorities: [ca("A", "https://fulcio", { start: "2022", end: "2027-01-01" }), ca("B", "https://fulcio", { start: "2026" })],
+      tlogs: [tlog("K1", "https://rekor", { start: "2021" }), tlog("K2", "https://log2026-1", { start: "2026" })],
+      timestampAuthorities: [ca("T", "https://tsa", { start: "2025" })],
+    };
+    expect(trustedRootDrift(pinned, pinned)).toEqual([]);
+    const { signingBlockedBy } = await import("../src/sigstore");
+    expect(signingBlockedBy(pinned, community, new Date("2026-06-01"))).toEqual([]); // CA A still active: additions only
+    expect(signingBlockedBy(pinned, community, new Date("2027-06-01"))).toEqual(["no currently valid certificate authority in the community root is in the enrollment's trusted root"]);
+    expect(trustedRootDrift(pinned, community)).toEqual([
+      "certificate authority https://fulcio ends on 2027-01-01 in the community root",
+      "new certificate authority https://fulcio (valid from 2026) is not in the enrollment's trusted root",
+      "new transparency log https://log2026-1 (valid from 2026) is not in the enrollment's trusted root",
+      "new timestamp authority https://tsa (valid from 2025) is not in the enrollment's trusted root",
+    ]);
   });
 });
 

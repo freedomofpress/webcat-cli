@@ -238,6 +238,12 @@ manifest is `ERR_WEBCAT_MANIFEST_EXPIRED`. A successful verification prints the 
 which the manifest stays valid. Note that `examples/` predates the `logs` field and its
 timestamp has expired, so verifying it fails, as it would in the browser.
 
+`manifest sign` reads the enrollment (default `.well-known/webcat/enrollment.json`) and signs
+for it: a key that is not an enrolled signer or a policy that does not compile to the
+enrollment's is refused before anything is submitted to a log, and the result is verified
+with the extension's own verifier before it is written, reporting how many of the required
+signatures are present.
+
 ### Sigstore signing
 
 Sigstore signing defaults to the community Fulcio/Rekor services. You can override the
@@ -282,6 +288,11 @@ npx webcat manifest sign \
   --oidc-client-id example-client \
   --interactive
 ```
+
+For Sigstore enrollments, `enrollment status` and `site check` compare the enrollment's pinned
+trusted root with the current community root and warn when a certificate authority, log or
+timestamp authority has been added or given an end date: that is the signal to re-enroll
+before signing again.
 
 ## Site checks
 

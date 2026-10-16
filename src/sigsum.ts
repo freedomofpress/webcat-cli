@@ -7,12 +7,14 @@ import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler.js";
 import { SigsumProof } from "@freedomofpress/sigsum/dist/proof.js";
 import { Hash, Leaf } from "@freedomofpress/sigsum/dist/types.js";
 import { witnessTimestampsFromCosignedTreeHead } from "@freedomofpress/webcat/webcat/validators";
+import type { SigsumEnrollment } from "./enrollment.js";
 import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
-import { causeOf, external, hexToBase64Url, invalid, sha256, toBase64Url } from "./utils.js";
+import { causeOf, external, hexToBase64Url, invalid, sha256, toBase64Url, validateAll } from "./utils.js";
 
 export interface SigsumSignOptions {
   policyFile: string;
   key: string;
+  enrollment?: SigsumEnrollment; // when given, refuse to submit anything the enrollment would not accept
   tokenSigningKey?: string;
   tokenDomain?: string;
 }
@@ -88,6 +90,21 @@ export async function signManifestWithSigsum(document: ManifestDocument, options
   const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
   if (document.signatures?.[signerKey]) {
     throw invalid(`manifest.signatures already contains a proof for signer ${signerKey}`);
+  }
+  if (options.enrollment) {
+    const [compiled] = await parsePolicy(await readFile(options.policyFile, "utf8"));
+    validateAll([
+      () => {
+        if (!options.enrollment!.signers.includes(signerKey)) {
+          throw invalid(`--key ${options.key} is signer ${signerKey}, which is not in enrollment.signers`);
+        }
+      },
+      () => {
+        if (toBase64Url(compiled) !== options.enrollment!.policy) {
+          throw invalid(`--policy-file ${options.policyFile} does not compile to enrollment.policy; browsers verify against the enrollment`);
+        }
+      },
+    ]);
   }
   const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
   const payloadPath = path.join(tempDir, "manifest.json");
