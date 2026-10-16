@@ -8,7 +8,7 @@ import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSign
 import { loadBundleDocument } from "../src/bundle";
 import { SIGSUM_TEST_POLICY } from "../src/init";
 import { sigsumEnrollmentFromPolicy } from "../src/sigsum";
-import { parseListLeaves, solvePow, toFqdn } from "../src/chain";
+import { parseListLeaves, solvePow, toFqdn, verifyList } from "../src/chain";
 import { writeCasObject } from "../src/cas";
 import {
   buildManifest,
@@ -570,6 +570,21 @@ describe("enrollment chain client", () => {
     const digest = createHash("sha256").update(challenge + nonce).digest();
     expect(digest[0]).toBe(0);
     expect(digest[1] >> 4).toBe(0);
+  });
+
+  it("verifies a recorded list.json against its block like the extension, and rejects tampering", async () => {
+    const list = JSON.parse(await readFile(path.join(__dirname, "fixtures/list.json"), "utf8"));
+    const block = JSON.parse(await readFile(path.join(__dirname, "fixtures/block.json"), "utf8"));
+    const verified = await verifyList(list, block);
+    expect(verified.blockHeight).toBe(list.block_height);
+    expect(verified.leaves.get("lsd.cat")).toMatch(/^[0-9a-f]{64}$/);
+    const tampered = { ...list, leaves: list.leaves.map((l: string[], i: number) => (i === 0 ? [l[0], "0a20" + "ab".repeat(32)] : l)) };
+    await expect(verifyList(tampered, block)).rejects.toThrow("leaves do not prove into the block's app hash");
+    await expect(verifyList({ ...list, proof: { ...list.proof, app_hash: "00".repeat(32) } }, block)).rejects.toThrow("app hash does not match");
+    const otherChain = JSON.parse(JSON.stringify(block)); otherChain.signed_header.header.chain_id = "other-chain";
+    await expect(verifyList(list, otherChain)).rejects.toThrow("Chain ID mismatch");
+    const badSig = JSON.parse(JSON.stringify(block)); badSig.signed_header.commit.signatures[0].signature = Buffer.alloc(64).toString("base64");
+    await expect(verifyList(list, badSig)).rejects.toThrow("not signed by a quorum");
   });
 
   it("decodes list.json leaves into domain -> hash", () => {
