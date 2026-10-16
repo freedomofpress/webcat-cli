@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command, CommanderError, Option } from "commander";
-import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
+import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
 import { publishSigsumProofToCas, writeCasObject } from "./cas.js";
 import {
@@ -42,7 +42,9 @@ import {
   fetchCommunityTrustedRoot,
   fetchInteractiveOidcToken,
   signManifestWithSigstore,
+  signingBlockedBy,
   staticIdentityProvider,
+  trustedRootDrift,
 } from "./sigstore.js";
 import {
   CliError,
@@ -287,6 +289,11 @@ enrollment
     const show = (value: string | null | undefined) => value ?? "none";
     process.stdout.write(`Domain: ${bareDomain(domain)}\n`);
     process.stdout.write(`Served enrollment: ${served instanceof Error ? `ERROR (${served.message})` : show(served?.hash)}\n`);
+    if (!(served instanceof Error) && served?.enrollment.type === EnrollmentTypes.Sigstore) {
+      const drift = trustedRootDrift(served.enrollment.trusted_root, await fetchCommunityTrustedRoot());
+      process.stdout.write(`Trusted root:      ${drift.length ? "WARNING, re-enroll before signing again" : "up to date with the community root"}\n`);
+      drift.forEach((line) => process.stdout.write(`                   - ${line}\n`));
+    }
     process.stdout.write(`Chain canonical:   ${show(status.canonical)}\n`);
     for (const p of status.pending) {
       process.stdout.write(`Chain pending:     ${show(p.hash)} (since ${p.time})\n`);
@@ -344,6 +351,7 @@ manifest
   .description("Sign a manifest with sigsum (default) or sigstore")
   .addOption(typeOption("Signature"))
   .option("-i, --input <path>", "Manifest file to sign", "manifest.json")
+  .option("-e, --enrollment <path>", "Enrollment to sign for: refuses keys or policies it would not accept and verifies the result", ".well-known/webcat/enrollment.json")
   .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit", "trust_policy")
   .option("-k, --key <path>", "Sigsum private key for signing")
   .option("--token-signing-key <path>", "Sigsum private key for token signing")
@@ -360,14 +368,26 @@ manifest
   .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
   .option("--no-open-browser", "Do not open a browser window for device authorization")
   .option("-o, --output <path>", "Write updated manifest to a file")
-  .action(async (options) => {
+  .action(async (options, command: Command) => {
     const document = await loadManifestDocument(options.input);
+    // The default enrollment path may simply not exist; an explicit one must.
+    const enrollment = await loadEnrollment(options.enrollment).catch((err) => {
+      if (command.getOptionValueSource("enrollment") === "default" && err instanceof CliError && /not found/.test(err.message)) {
+        log(`Warning: ${options.enrollment} not found, the signed manifest is not checked against an enrollment`);
+        return undefined;
+      }
+      throw err;
+    });
+    if (enrollment && enrollment.type !== options.type) {
+      throw invalid(`--type ${options.type} but ${options.enrollment} is a ${enrollment.type} enrollment`);
+    }
 
     if (options.type === "sigsum") {
       requireOptions("sigsum signing", [options.policyFile, "--policy-file"], [options.key, "--key"]);
       const proofText = await signManifestWithSigsum(document, {
         policyFile: options.policyFile,
         key: options.key,
+        enrollment: enrollment?.type === EnrollmentTypes.Sigsum ? enrollment : undefined,
         tokenSigningKey: options.tokenSigningKey,
         tokenDomain: options.tokenDomain,
       });
@@ -381,6 +401,15 @@ manifest
       }
       if (options.oidcToken && options.interactive) {
         throw invalid("--oidc-token and --interactive are mutually exclusive");
+      }
+      if (enrollment?.type === EnrollmentTypes.Sigstore) {
+        // Fail before requesting a certificate when the pinned root can no longer verify new signatures.
+        const community = await fetchCommunityTrustedRoot();
+        const blocked = signingBlockedBy(enrollment.trusted_root, community);
+        if (blocked.length) {
+          throw invalid(`signing cannot produce a manifest that verifies under ${options.enrollment}; re-enroll with a fresh trusted root first:\n  - ${blocked.join("\n  - ")}`);
+        }
+        trustedRootDrift(enrollment.trusted_root, community).forEach((line) => log(`Warning: ${line}; plan a re-enrollment`));
       }
       const identityProvider = options.oidcToken
         ? staticIdentityProvider(options.oidcToken)
@@ -401,6 +430,16 @@ manifest
         tsaUrl: options.tsaUrl,
         identityProvider,
       });
+    }
+    if (enrollment) {
+      const result = await verifyBundle({ enrollment, manifest: document });
+      if (result instanceof WebcatError && result.code === WebcatErrorCode.Manifest.THRESHOLD_UNSATISFIED) {
+        log(`Signed: ${result.details?.[0]} of ${result.details?.[1]} required signatures present, sign again with another enrolled key`);
+      } else if (result instanceof WebcatError) {
+        throw invalid(`the signed manifest does not verify against ${options.enrollment}: ${describeWebcatError(result)}; nothing written`);
+      } else {
+        log(`Verified against ${options.enrollment}: ${describeValidity(result)}`);
+      }
     }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
@@ -473,6 +512,10 @@ program
     process.stdout.write(`Bundle:          ${report.bundle}\n`);
     process.stdout.write(`Previous bundle: ${report.previousBundle}\n`);
     process.stdout.write(`Enrollment:      ${report.enrollment}\n`);
+    if (report.trustedRoot.length) {
+      process.stdout.write("Trusted root:    WARNING, re-enroll before signing again\n");
+      report.trustedRoot.forEach((line) => process.stdout.write(`  - ${line}\n`));
+    }
     const failed = report.paths.filter((p) => p.problems.length > 0);
     process.stdout.write(`Paths:           ${report.paths.length} checked, ${failed.length} with problems\n`);
     for (const { path, problems } of failed) {
