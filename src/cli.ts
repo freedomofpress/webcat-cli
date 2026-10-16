@@ -3,7 +3,7 @@ import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
-import { publishSigsumProofToCas, writeCasObject } from "./cas.js";
+import { publishManifestToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
   buildManifest,
@@ -215,7 +215,6 @@ enrollmentCreate.action(async (options) => {
   if (options.type === "sigsum") {
     requireOptions(
       "sigsum enrollments",
-      [options.policyFile, "--policy-file"],
       [options.signer, "--signer"],
       [options.threshold, "--threshold"],
       [options.maxAge, "--max-age"],
@@ -392,7 +391,7 @@ manifest
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
-    const policyFile = options.type === "sigsum" ? requireOption(options.policyFile, "--policy-file", "sigsum manifests") : undefined;
+    const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
     const [config, scan, timestamp] = await Promise.all([
       loadManifestConfig(options.config),
       scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: options.exclude }),
@@ -439,18 +438,14 @@ manifest
     }
 
     if (options.type === "sigsum") {
-      requireOptions("sigsum signing", [options.policyFile, "--policy-file"], [options.key, "--key"]);
-      const proofText = await signManifestWithSigsum(document, {
+      requireOption(options.key, "--key", "sigsum signing");
+      await signManifestWithSigsum(document, {
         policyFile: options.policyFile,
         key: options.key,
         enrollment: enrollment?.type === EnrollmentTypes.Sigsum ? enrollment : undefined,
         tokenSigningKey: options.tokenSigningKey,
         tokenDomain: options.tokenDomain,
       });
-      const { leaf, checksum, manifest: canonical } = await publishSigsumProofToCas(canonicalizeManifestBody(document), proofText);
-      log(`Saved raw Sigsum leaf to ${leaf.filePath} (sha256=${leaf.hash}).`);
-      log(`Saved Sigsum checksum payload to ${checksum.filePath} (sha256=${checksum.hash}).`);
-      log(`Saved canonical manifest to ${canonical.filePath} (sha256=${canonical.hash}).`);
     } else {
       if (options.bundleType === "dsse") {
         log("Warning: WEBCAT verifiers only accept message-signature bundles; a dsse bundle will not verify.");
@@ -461,7 +456,7 @@ manifest
       if (enrollment?.type === EnrollmentTypes.Sigstore) {
         // Fail before requesting a certificate when the pinned root can no longer verify new signatures.
         const community = await fetchCommunityTrustedRoot();
-        const blocked = signingBlockedBy(enrollment.trusted_root, community);
+        const blocked = signingBlockedBy(enrollment.trusted_root, community, { withTsa: Boolean(options.tsaUrl) });
         if (blocked.length) {
           throw invalid(`signing cannot produce a manifest that verifies under ${options.enrollment}; re-enroll with a fresh trusted root first:\n  - ${blocked.join("\n  - ")}`);
         }
@@ -488,14 +483,21 @@ manifest
       });
     }
     if (enrollment) {
-      const result = await verifyBundle({ enrollment, manifest: document });
-      if (result instanceof WebcatError && result.code === WebcatErrorCode.Manifest.THRESHOLD_UNSATISFIED) {
-        log(`Signed: ${result.details?.[0]} of ${result.details?.[1]} required signatures present, sign again with another enrolled key`);
-      } else if (result instanceof WebcatError) {
-        throw invalid(`the signed manifest does not verify against ${options.enrollment}: ${describeWebcatError(result)}; nothing written`);
-      } else {
-        log(`Verified against ${options.enrollment}: ${describeValidity(result)}`);
+      // Verify before publishing anything; a partial threshold still gets the timestamp and expiry checks (threshold 1).
+      let result = await verifyBundle({ enrollment, manifest: document });
+      const partial = result instanceof WebcatError && result.code === WebcatErrorCode.Manifest.THRESHOLD_UNSATISFIED ? result : null;
+      if (partial && enrollment.type === EnrollmentTypes.Sigsum) {
+        result = await verifyBundle({ enrollment: { ...enrollment, threshold: 1 }, manifest: document });
       }
+      if (result instanceof WebcatError) {
+        throw invalid(`the signed manifest does not verify against ${options.enrollment}: ${describeWebcatError(result)}; nothing written`);
+      }
+      log(partial ? `Signed: ${partial.details?.[0]} of ${partial.details?.[1]} required signatures present, sign again with another enrolled key` : `Verified against ${options.enrollment}: ${describeValidity(result)}`);
+    }
+    if (options.type === "sigsum") {
+      const { checksum, manifest: canonical } = await publishManifestToCas(canonicalizeManifestBody(document));
+      log(`Saved Sigsum checksum payload to ${checksum.filePath} (sha256=${checksum.hash}).`);
+      log(`Saved canonical manifest to ${canonical.filePath} (sha256=${canonical.hash}).`);
     }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });

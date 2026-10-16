@@ -175,9 +175,10 @@ ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do
 
 ### Content-addressable storage (`cas_url`)
 
-A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes three objects under `./cas/`,
-named by their SHA-256: the raw Sigsum leaf, the checksum payload, and the canonical manifest.
-Monitors walk from a log entry back to the manifest through them, so the site must serve the
+A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes two objects under `./cas/`,
+named by their SHA-256: the submitted message (the manifest's SHA-256) and the canonical manifest.
+A log entry's checksum is the SHA-256 of the message, so an auditor fetches `cas_url/<checksum>`
+to get the message and `cas_url/<sha256 of message>` to get the manifest; the site must serve the
 `cas/` directory at `cas_url` as static files (any https URL you control works, for example
 `https://example.org/cas/`). With `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
 `WEBCAT_CAS_S3_TOKEN` set, `manifest sign` also uploads them to an S3-compatible bucket.

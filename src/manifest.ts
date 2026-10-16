@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { SerializedBundle } from "@sigstore/bundle";
 import type { Manifest, SigsumSignatures } from "@freedomofpress/webcat/webcat/interfaces/bundle";
@@ -40,6 +40,9 @@ export function validateManifestContent(manifest: ManifestContent, subject = "ma
   validateAll([
     () => check(validateManifest(asLibraryManifest(manifest)), subject),
     ...policies.map(([field, csp]) => () => {
+      if (typeof csp !== "string") {
+        throw invalid(`${subject}.${field} must be a CSP string`);
+      }
       try {
         validateCSP(csp);
       } catch (err) {
@@ -109,11 +112,13 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
         continue;
       }
       const entryPath = path.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
+      // Follow symlinks, as a web server serving the directory would.
+      const target = entry.isSymbolicLink() ? await stat(entryPath) : entry;
+      if (target.isDirectory()) {
         await walk(entryPath, relativePath);
         continue;
       }
-      if (!entry.isFile()) {
+      if (!target.isFile()) {
         continue;
       }
       const encoded = toBase64Url(sha256(await readFile(entryPath)));

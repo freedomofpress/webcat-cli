@@ -1,4 +1,4 @@
-import type { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
+import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { verifySigstoreManifest, verifySigsumManifest } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, parseEnrollmentObject } from "./enrollment.js";
 import { ManifestDocument, asLibraryManifest, parseManifestDocumentObject } from "./manifest.js";
@@ -42,7 +42,9 @@ export async function verifyBundle({ enrollment, manifest: document }: BundleDoc
     throw invalid(`manifest.signatures contains ${sigsum ? "Sigstore bundles" : "sigsum proofs"} but enrollment.type is ${enrollment.type}`);
   }
   const manifest = asLibraryManifest(document.manifest);
-  return sigsum
-    ? verifySigsumManifest(enrollment, manifest, signatures as Record<string, string>)
-    : withConsoleOnStderr(() => verifySigstoreManifest(enrollment, manifest, signatures as any[]));
+  const result = sigsum
+    ? await verifySigsumManifest(enrollment, manifest, signatures as Record<string, string>)
+    : await withConsoleOnStderr(() => verifySigstoreManifest(enrollment, manifest, signatures as any[]));
+  // A policy with no witness quorum yields no timestamp at all; the library then returns NaN rather than an error.
+  return typeof result === "number" && !Number.isFinite(result) ? new WebcatError(WebcatErrorCode.Manifest.TIMESTAMP_VERIFY_FAILED, ["no witness timestamp"]) : result;
 }

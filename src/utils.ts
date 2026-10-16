@@ -43,6 +43,23 @@ export function validateAll(checks: Array<() => unknown>): void {
   }
 }
 
+// fetch that turns transport errors and non-2xx answers into exit-3 errors naming the URL.
+export async function fetchOk(url: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(url, init).catch((err) => {
+    throw external(`failed to fetch ${url}: ${causeOf(err)}`);
+  });
+  if (!response.ok) {
+    throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
+  }
+  return response;
+}
+export const fetchJson = (url: string, init?: RequestInit): Promise<any> =>
+  fetchOk(url, init).then((r) =>
+    r.json().catch((err) => {
+      throw external(`failed to fetch ${url}: not valid JSON: ${causeOf(err)}`);
+    }),
+  );
+
 // Validation itself comes from @freedomofpress/webcat, the extension's own validators, so the CLI
 // accepts exactly what browsers accept. Its errors carry a code (ERR_WEBCAT_...) plus details.
 export const describeWebcatError = (err: WebcatError): string => (err.details?.length ? `${err.code} (${err.details.join(", ")})` : err.code);
