@@ -477,6 +477,21 @@ describe("policy and bundle parsing", () => {
   });
 });
 
+describe("init", () => {
+  it("writes a config, a policy and a valid enrollment from flags alone", async () => {
+    const { runInit, CSP_PRESETS } = await import("../src/init");
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-"));
+    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)], casUrl: "https://example.org/cas/" });
+    const config = JSON.parse(await readFile(path.join(dir, "webcat.config.json"), "utf8"));
+    expect(config.app).toBe("https://example.org");
+    expect(config.default_csp).toBe(CSP_PRESETS.static.csp);
+    const enrollment = await loadEnrollment(path.join(dir, ".well-known/webcat/enrollment.json"));
+    expect(enrollment.type).toBe("sigsum");
+    expect(await readFile(path.join(dir, "trust_policy"), "utf8")).toContain("quorum");
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
 describe("validity", () => {
   it("warns when a manifest expires within 30 days", async () => {
     const { describeValidity } = await import("../src/bundle");
