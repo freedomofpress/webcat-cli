@@ -58,30 +58,50 @@ To learn more about Sigsum and how to write a policy, see Sigsum's [_Getting Sta
 
 ### Choosing Sigstore
 
-If you choose Sigstore, WEBCAT provides GitHub Actions that support automated deployments.
+If you choose Sigstore, signing happens in CI with the workflow's own identity, so no key
+material is stored anywhere. This guide assumes the Sigstore [_Public Good_ instance](https://openssf.org/blog/2023/10/03/running-sigstore-as-a-managed-service-a-tour-of-sigstores-public-good-instance/),
+the same one used by GitHub and public container registries.
 
 > [!WARNING]
 > Sigstore support is still a work in progress. Claim-based enrollment constraints are supported.
 
-In theory, WEBCAT also supports a bring-your-own Sigstore deployment. This is not documented here due to its complexity. This guide assumes you are using the Sigstore [_Public Good_ instance](https://openssf.org/blog/2023/10/03/running-sigstore-as-a-managed-service-a-tour-of-sigstores-public-good-instance/), the same one used by GitHub and public container registries.
+Enroll once, naming the workflow that will sign (the identity is the workflow file at the
+branch that runs it):
 
-The Sigstore workflow consists of two actions:
+```sh
+npx webcat init --type sigstore \
+  --origin https://example.org \
+  --identity https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --issuer https://token.actions.githubusercontent.com
+```
 
-* Enrollment Update Action - [Source](https://github.com/freedomofpress/webcat-cli/blob/main/.github/workflows/sigstore-enrollment-sync.yml) / [Example usage](https://github.com/freedomofpress/webcat-demo-test/blob/main/.github/workflows/sync-sigstore-enrollment.yml)
+Then have that workflow call the CLI directly. The `id-token` permission is what lets the job
+obtain a Sigstore certificate for its identity:
 
-  * Fetches the latest trust material using TUF
-  * Updates enrollment information if changes are detected
-  * Submits the updated enrollment for re-evaluation by the distributed system
-    *(This submission step will soon be integrated directly into the CLI.)*
+```yaml
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build                      # produces dist/
+      - run: npx @freedomofpress/webcat-cli manifest generate --type sigstore -d dist -o manifest.json
+      - run: npx @freedomofpress/webcat-cli manifest sign --type sigstore -o manifest.signed.json
+      - run: npx @freedomofpress/webcat-cli bundle create -o dist/.well-known/webcat/bundle.json
+      - run: cp .well-known/webcat/enrollment.json dist/.well-known/webcat/
+      # deploy dist/ as usual; keep the previous bundle.json as bundle-prev.json across enrollment changes
+```
 
-> [!CAUTION]
-> Sigstore enrollments support claim-based constraints using certificate extension OIDs.
-
-* Manifest Update Action - [Example Usage](https://github.com/freedomofpress/webcat-demo-test/blob/main/.github/workflows/generate-sign-sigstore-manifest.yaml)
-
-  * Generates, signs, and bundles a WEBCAT manifest
-
-See the `webcat-demo-test` repository for a complete, end-to-end example of this flow. Note: due to how the Sigstore is claimed in Github Action, this has to be copied in the target repository and should not be invoked directly from the webcat0-cli one.
+`manifest sign` checks the enrollment before requesting a certificate and fails the job with
+exit 2 if the enrollment's pinned trusted root can no longer verify new signatures. When that
+happens, re-run `init` (or `enrollment create --community-trusted-root`) to refresh the root,
+then `enrollment submit` so the chain records the new enrollment.
 
 ## Using the CLI
 
@@ -93,7 +113,7 @@ Take a look at [`demo.sh`](./demo.sh) or the [end-to-end example] below.
 
 ### If you are using Sigstore
 
-Refer to the GitHub Actions described above.
+See the CI job above; every step is a plain CLI invocation.
 
 ## Requirements
 
