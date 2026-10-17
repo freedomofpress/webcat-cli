@@ -101,9 +101,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci && npm run build                      # produces dist/
-      - run: npx @freedomofpress/webcat-cli manifest generate --type sigstore -d dist -o manifest.json
-      - run: npx @freedomofpress/webcat-cli manifest sign --type sigstore -o manifest.signed.json
-      - run: npx @freedomofpress/webcat-cli bundle create --commit   # writes bundle.json + manifest.<type>.<hash>.json, commits them
+      - run: npx @freedomofpress/webcat-cli release --type sigstore   # generate + sign + bundle create --commit, for the tag at HEAD
       - run: cp -r .well-known dist/                                   # the whole directory is the site's history
       # deploy dist/ as usual, then push the commit so the history stays in the repository
 ```
@@ -158,6 +156,12 @@ go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 By default, these binaries will be available in `$HOME/go/bin`.
 
 ## Getting started
+
+After `init`, a release is one command once the commit is tagged: `webcat release -k keys/key1`
+(or `release --type sigstore` in CI). It generates the manifest from the configured build
+directory, signs it with each key given, writes `bundle.json`, the hash-named manifest file and
+the release archive named by the `artifact` template, and commits. The granular `manifest` and
+`bundle` commands remain for multi-signer setups where signatures are collected across machines.
 
 `init` offers two built-in Sigsum policies: `test` (the Sigsum test logs, no rate limiting)
 and `production` (`sigsum-generic-2025-1`, logs and witnesses vetted by the Sigsum project).
@@ -478,6 +482,7 @@ or a JSON equivalent) matching the schema below:
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Default index file served when a directory is requested; leading `/` is stripped automatically. |
 | `default_fallback` | string | Absolute path served when a file is missing. |
+| `directory` | string, optional | Where the built site lives; used by `release`. Never part of the manifest. |
 | `wasm` | string[] | Optional list of base64url SHA-256 digests for inline WebAssembly modules. `.wasm` files are added automatically during generation. |
 | `extra_csp` | Record<string, string> | Optional per-path CSP overrides; keys must start with `/`. | `{}` or `{ "/app": "default-src 'none'" }` |
 

@@ -3,6 +3,8 @@ import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
 import {
@@ -666,6 +668,57 @@ program
     const written = await publishBundle(options.dir, enrollment, document);
     written.forEach((f) => log(`wrote ${f}`));
     await stageInGit(written, options.git, options.commit ? `webcat: publish manifest ${document.manifest.version}` : undefined);
+  });
+
+// ---------------------------------------------------------------------------
+// release
+
+// One step for the common case: the tag at HEAD is the version, the config knows the build directory.
+// Runs the granular commands as subprocesses so every flag and exit code behaves exactly as documented.
+program
+  .command("release")
+  .description("Generate, sign, bundle and commit the release that HEAD is tagged with (manifest generate + sign + bundle create --commit in one step)")
+  .option("-d, --directory <path>", "Directory with the built site (default: config.directory)")
+  .addOption(typeOption("Signature"))
+  .option("-k, --key <path>", "Sigsum signing key, repeatable up to the threshold (private key, or .pub held in ssh-agent)", collect)
+  .option("--token-signing-key <path>", "Rate-limit token key for production Sigsum logs")
+  .option("--token-domain <domain>", "Domain for Sigsum rate limiting")
+  .option("--oidc-token <value>", "Explicit OIDC token for Sigstore signing")
+  .option("--interactive", "OIDC device flow for Sigstore signing")
+  .option("--no-archive", "Do not write the release archive even when the config has artifact")
+  .option("--no-commit", "Stage the published files instead of committing them")
+  .option("--skip-git-checks", "Skip the tag-at-HEAD and clean-tree checks")
+  .action(async (options) => {
+    const config = await loadManifestConfig("webcat.config.json");
+    const directory = options.directory ?? config.directory;
+    if (!directory) throw invalid("--directory is required (or set directory in webcat.config.json)");
+    if (options.type === "sigsum") requireOption(options.key, "--key", "a sigsum release");
+    const version = config.version ?? (await gitTagAtHead());
+    const archive = options.archive && config.artifact && version ? path.basename(config.artifact.replace(/\$\{version\}/g, version)) : undefined;
+    const run = (...args: string[]) =>
+      new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, [...process.execArgv, process.argv[1], ...args], { stdio: "inherit" });
+        child.on("exit", (code) => (code === 0 ? resolve() : reject(new CliError(`release stopped at: webcat ${args.join(" ")}`, code === 3 ? 3 : 2))));
+      });
+    const work = await mkdtemp(path.join(tmpdir(), "webcat-release-"));
+    const skip = options.skipGitChecks ? ["--skip-git-checks"] : [];
+    const unsigned = path.join(work, "manifest.json");
+    const signed = path.join(work, "manifest.signed.json");
+    await run("manifest", "generate", "--type", options.type, "-d", directory, "-o", unsigned, ...(archive ? ["--archive", archive] : []), ...skip);
+    if (options.type === "sigsum") {
+      let input = unsigned;
+      for (const key of options.key as string[]) {
+        const token = options.tokenSigningKey && options.tokenDomain ? ["--token-signing-key", options.tokenSigningKey, "--token-domain", options.tokenDomain] : [];
+        await run("manifest", "sign", "-i", input, "-k", key, ...token, "-o", signed, ...skip);
+        input = signed;
+      }
+    } else {
+      const auth = options.oidcToken ? ["--oidc-token", options.oidcToken] : options.interactive ? ["--interactive"] : [];
+      await run("manifest", "sign", "--type", "sigstore", "-i", unsigned, ...auth, "-o", signed, ...skip);
+    }
+    await run("bundle", "create", "-m", signed, ...(options.commit ? ["--commit"] : []));
+    await rm(work, { recursive: true, force: true });
+    log(`Released ${version ?? "(unversioned)"}. Left to do: push the commit and tag${archive ? `, upload ${archive} where ${config.artifact} resolves` : ""}, deploy with ${WELL_KNOWN_DIR}/ in the web root`);
   });
 
 // ---------------------------------------------------------------------------

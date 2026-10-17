@@ -9,7 +9,8 @@ import { causeOf, check, ensureObject, invalid, log, readJson, sha256, toBase64U
 // Provenance fields from the spec: source (git URL, version is a tag there) and artifact (release archive URL template).
 // `app` is deprecated and ignored by the extension; the library's interface says `name` and reads neither.
 export type ManifestContent = Omit<Manifest, "name"> & { app?: string; source?: string; artifact?: string };
-export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "version"> & { version?: string }; // version may come from the release tag
+// version may come from the release tag; directory is where the built site lives (CLI-only, never in the manifest).
+export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "version"> & { version?: string; directory?: string };
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
 export interface ManifestDocument {
@@ -102,6 +103,7 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     ...(c.source !== undefined ? { source: str("source") } : {}),
     ...(c.artifact !== undefined ? { artifact: str("artifact") } : {}),
     ...(c.version !== undefined ? { version: str("version") } : {}),
+    ...(c.directory !== undefined ? { directory: str("directory") } : {}),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
     default_fallback: str("default_fallback"),
