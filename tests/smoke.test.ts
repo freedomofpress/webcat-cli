@@ -47,7 +47,7 @@ describe("command line", () => {
     const { stdout, code } = webcat("enrollment", "create", "-p", "/nonexistent");
     expect(code).toBe(2);
     expect(stdout).toContain("--signer is required");
-    expect(stdout).toContain("--cas-url is required");
+    expect(stdout).toContain("--threshold is required");
   });
 
   it("maps usage errors to exit 2 and prints a version", () => {

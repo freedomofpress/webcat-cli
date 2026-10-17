@@ -103,9 +103,9 @@ jobs:
       - run: npm ci && npm run build                      # produces dist/
       - run: npx @freedomofpress/webcat-cli manifest generate --type sigstore -d dist -o manifest.json
       - run: npx @freedomofpress/webcat-cli manifest sign --type sigstore -o manifest.signed.json
-      - run: npx @freedomofpress/webcat-cli bundle create -o dist/.well-known/webcat/bundle.json
-      - run: cp .well-known/webcat/enrollment.json dist/.well-known/webcat/
-      # deploy dist/ as usual; keep the previous bundle.json as bundle-prev.json across enrollment changes
+      - run: npx @freedomofpress/webcat-cli bundle create --commit   # writes bundle.json + manifest.<type>.<hash>.json, commits them
+      - run: cp -r .well-known dist/                                   # the whole directory is the site's history
+      # deploy dist/ as usual, then push the commit so the history stays in the repository
 ```
 
 `manifest sign` checks the enrollment before requesting a certificate and fails the job with
@@ -173,26 +173,28 @@ everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
 `manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
 ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
 
-### Content-addressable storage (`cas_url`)
+### History and git
 
-A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes two objects under `./cas/`,
-named by their SHA-256: the submitted message (the manifest's SHA-256) and the canonical manifest.
-A log entry's checksum is the SHA-256 of the message, so an auditor fetches `cas_url/<checksum>`
-to get the message and `cas_url/<sha256 of message>` to get the manifest; the site must serve the
-`cas/` directory at `cas_url` as static files (any https URL you control works, for example
-`https://example.org/cas/`). With `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
-`WEBCAT_CAS_S3_TOKEN` set, `manifest sign` also uploads them to an S3-compatible bucket.
+`.well-known/webcat/` is the site's append-only history and the directory auditors read
+([spec, server.md section 1](https://github.com/freedomofpress/webcat-spec)). It belongs in the
+repository, and the deploy copies it into the web root. The CLI writes into it and never
+rewrites a hash-named file:
 
-`init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
-or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
-`.well-known/webcat/enrollment.json`, and prints the next steps. Every answer is also a flag,
-so it runs unattended in CI:
+| File | Written by |
+|------|-----------|
+| `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o` |
+| `bundle.json`, `manifest.sigsum.<checksum>.json` or `manifest.sigstore.<hash>.json` | `bundle create` |
+| `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle |
 
-```sh
-npx webcat init
-npx webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
-npx webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
-```
+Every command that writes there stages the files in git when run inside a repository, and
+`bundle create --commit` commits them. `--no-git` opts out. `history check [ref]` verifies that
+every hash-named file hashes to its name, that the current pointers match them, and that nothing
+was modified or deleted since `ref`; run it in CI with `origin/main` as the ref.
+
+When `webcat.config.json` sets `source`, the manifest claims the files build from that
+repository at tag `version`: `manifest generate` requires HEAD to be that tag and `manifest sign`
+requires a clean working tree (`--skip-git-checks` overrides both). `manifest generate --archive`
+writes the release tarball the `artifact` URL must serve for the version.
 
 ## Enrollment helpers
 
@@ -382,13 +384,15 @@ Errors are printed to stderr as `Error: <message>`. Messages name the CLI flag (
 
 ## Bundle helpers
 
-Use `bundle create` to combine an enrollment and a manifest (with signatures) into a WEBCAT bundle that can be distributed to verifiers:
+`bundle create` publishes a signed manifest into the well-known directory: it writes `bundle.json`
+and the hash-named manifest file, keeps the previous bundle as `bundle-prev.json` when the
+enrollment changed, and stages (or with `--commit`, commits) the files. With `-o` it only writes
+the bundle to that path, for example to inspect one:
 
 ```sh
-npx webcat bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
+npx webcat bundle create --commit
+npx webcat bundle create -e examples/enrollment.json -m examples/manifest.json -o bundle.json
 ```
-
-The resulting `bundle.json` matches the fixture located in `examples/bundle.json`.
 
 ## End-to-end example (based on `demo.sh`)
 
@@ -414,7 +418,7 @@ EOF
 
 cat > webcat.config.json <<'EOF'
 {
-  "app": "https://github.com/element-hq/element-web",
+  "source": "https://github.com/element-hq/element-web",
   "version": "1.12.3",
   "default_csp": "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; img-src * blob: data:; connect-src * blob:; font-src 'self' data: ; media-src * blob: data:; child-src blob: data:; worker-src 'self'; frame-src blob: data:; form-action 'self'; manifest-src 'self'; frame-ancestors 'self'",
   "default_index": "index.html",
@@ -433,7 +437,6 @@ npx webcat enrollment create \
   --policy-file trust_policy \
   --threshold 1 \
   --max-age 15552000 \
-  --cas-url https://cas.demoelement.com \
   --signer "$HEX1" \
   --signer "$HEX2" \
   --output enrollment.json
@@ -468,7 +471,9 @@ or a JSON equivalent) matching the schema below:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `app` | string | Origin URL of the application being packaged. |
+| `source` | string, optional | Git repository the site is built from; `version` must be a tag there. Auditors rebuild from it. |
+| `artifact` | string, optional | Release archive URL template containing `${version}`; must serve a gzip tar of the web root. |
+| `app` | string, deprecated | Replaced by `source`; accepted with a warning and ignored by the extension. |
 | `version` | string | Git tag to be used for reproducibility and auditing. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Default index file served when a directory is requested; leading `/` is stripped automatically. |

@@ -4,10 +4,11 @@ import type { SerializedBundle } from "@sigstore/bundle";
 import type { Manifest, SigsumSignatures } from "@freedomofpress/webcat/webcat/interfaces/bundle";
 import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateCSP, validateManifest } from "@freedomofpress/webcat/webcat/validators";
-import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url, validateAll } from "./utils.js";
+import { causeOf, check, ensureObject, invalid, log, readJson, sha256, toBase64Url, validateAll } from "./utils.js";
 
-// The CLI writes `app` where the library's interface says `name`; the extension reads neither.
-export type ManifestContent = Omit<Manifest, "name"> & { app: string };
+// Provenance fields from the spec: source (git URL, version is a tag there) and artifact (release archive URL template).
+// `app` is deprecated and ignored by the extension; the library's interface says `name` and reads neither.
+export type ManifestContent = Omit<Manifest, "name"> & { app?: string; source?: string; artifact?: string };
 export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp">;
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
@@ -62,14 +63,23 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   };
   const wasm = c.wasm ?? [];
   const extra_csp = c.extra_csp ?? {};
+  const optionalUrl = (key: string, protocols: string[], extra?: (url: string) => string | undefined) => () => {
+    if (c[key] === undefined) return;
+    let url: URL;
+    try {
+      url = new URL(str(key));
+    } catch (err) {
+      throw invalid(`config.${key} must be a URL: ${causeOf(err)}`);
+    }
+    if (!protocols.includes(url.protocol)) throw invalid(`config.${key} must use ${protocols.join(" or ")}`);
+    const problem = extra?.(String(c[key]));
+    if (problem) throw invalid(`config.${key} ${problem}`);
+  };
+  if (c.app !== undefined) log("Warning: config.app is deprecated; set source (git repository URL) and artifact (release archive URL template) instead");
   validateAll([
-    () => {
-      try {
-        new URL(str("app"));
-      } catch (err) {
-        throw invalid(`config.app must be a valid URL: ${causeOf(err)}`);
-      }
-    },
+    optionalUrl("app", ["https:", "http:"]),
+    optionalUrl("source", ["https:", "ssh:"]),
+    optionalUrl("artifact", ["https:", "http:"], (u) => (u.includes("${version}") ? undefined : "must contain ${version}")),
     ...["version", "default_csp", "default_index", "default_fallback"].map((key) => () => str(key)),
     () => {
       if (!Array.isArray(wasm) || !wasm.every((w) => typeof w === "string")) {
@@ -83,8 +93,11 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     },
   ]);
   // CSP, index and fallback are checked with the extension's rules once the manifest is built.
+  if (c.source === undefined && c.artifact === undefined) log("Warning: neither config.source nor config.artifact is set; auditors cannot reproduce or fetch this release");
   return {
-    app: str("app"),
+    ...(c.app !== undefined ? { app: str("app") } : {}),
+    ...(c.source !== undefined ? { source: str("source") } : {}),
+    ...(c.artifact !== undefined ? { artifact: str("artifact") } : {}),
     version: str("version"),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
@@ -96,7 +109,8 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
 
 export async function scanDirectory(rootDir: string, options: DirectoryScanOptions = {}): Promise<DirectoryScanResult> {
   const result: DirectoryScanResult = { files: new Map(), wasm: new Set() };
-  const excludePaths = (options.excludePaths ?? [])
+  // The well-known directory is never part of the manifest: its content changes after signing.
+  const excludePaths = [".well-known/webcat", ...(options.excludePaths ?? [])]
     .map((raw) => raw.trim().replace(/\\/g, "/").replace(/^\.?\/*/, "").replace(/\/+$/, ""))
     .filter(Boolean);
   const isExcluded = (relativePath: string) =>
@@ -136,7 +150,9 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
 
 export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
   const manifest: ManifestContent = {
-    app: config.app,
+    ...(config.app !== undefined ? { app: config.app } : {}),
+    ...(config.source !== undefined ? { source: config.source } : {}),
+    ...(config.artifact !== undefined ? { artifact: config.artifact } : {}),
     version: config.version,
     default_csp: config.default_csp,
     files: sortedEntries(Object.fromEntries(scan.files)),

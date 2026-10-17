@@ -43,7 +43,7 @@ export async function verifyBundle({ enrollment, manifest: document }: BundleDoc
   }
   const manifest = asLibraryManifest(document.manifest);
   const result = sigsum
-    ? await verifySigsumManifest(enrollment, manifest, signatures as Record<string, string>)
+    ? await verifySigsumManifest(enrollment as Parameters<typeof verifySigsumManifest>[0], manifest, signatures as Record<string, string>)
     : await withConsoleOnStderr(() => verifySigstoreManifest(enrollment, manifest, signatures as any[]));
   // A policy with no witness quorum yields no timestamp at all; the library then returns NaN rather than an error.
   return typeof result === "number" && !Number.isFinite(result) ? new WebcatError(WebcatErrorCode.Manifest.TIMESTAMP_VERIFY_FAILED, ["no witness timestamp"]) : result;

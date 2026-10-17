@@ -5,7 +5,9 @@ import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type BundleDocument, describeValidity, parseBundleObject, verifyBundle } from "./bundle.js";
 import { bareDomain, enrollmentHashHex, fetchDomainStatus, fetchServedEnrollment } from "./chain.js";
-import { EnrollmentTypes } from "./enrollment.js";
+import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
+import { EnrollmentTypes, parseEnrollmentObject } from "./enrollment.js";
+import { WELL_KNOWN_DIR, enrollmentFileName, enrollmentHash, manifestFileName } from "./history.js";
 import type { ManifestContent } from "./manifest.js";
 import { fetchCommunityTrustedRoot, trustedRootDrift } from "./sigstore.js";
 import { causeOf, describeWebcatError, external, sha256, toBase64Url } from "./utils.js";
@@ -20,6 +22,7 @@ export interface SiteReport {
   previousBundle: string;
   enrollment: string;
   trustedRoot: string[]; // drift lines for Sigstore enrollments, empty when up to date or not applicable
+  history: string[]; // missing or inconsistent hash-named files auditors need (spec server.md section 1)
   paths: PathCheck[];
 }
 
@@ -168,7 +171,7 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
   }
   const previous = await fetchBundle(origin + defaults.bundlePrevPath);
   if (!current.bundle) {
-    return { bundle: current.verdict, previousBundle: previous ? previous.verdict : "none", enrollment: "not checked, the bundle did not parse", trustedRoot: [], paths: [] };
+    return { bundle: current.verdict, previousBundle: previous ? previous.verdict : "none", enrollment: "not checked, the bundle did not parse", trustedRoot: [], history: [], paths: [] };
   }
   const bundleHash = enrollmentHashHex(current.bundle.enrollment);
   const [served, status] = await Promise.all([
@@ -191,6 +194,34 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
         ? "chain agrees"
         : `MISMATCH: the chain records ${status.canonical ?? "nothing"}, browsers will not verify this site`;
   const enrollment = `bundle embeds ${bundleHash}; ${servedPart}; ${chainPart}`;
+  // The history auditors read: hash-named files for the enrollment(s) in play and for the served manifest.
+  const history: string[] = [];
+  const expectHistoryFile = async (name: string, why: string, matches: (text: string) => boolean) => {
+    const url = `${origin}/${WELL_KNOWN_DIR}/${name}`;
+    const response = await fetch(url).catch(() => null);
+    if (!response?.ok) history.push(`${name} is not served (${why})`);
+    else if (!matches(await response.text())) history.push(`${name} does not match its name (${why})`);
+  };
+  const hashesTo = (hash: string) => (text: string) => {
+    try {
+      return enrollmentHash(parseEnrollmentObject(JSON.parse(text))) === hash;
+    } catch {
+      return false;
+    }
+  };
+  await expectHistoryFile(enrollmentFileName(current.bundle.enrollment), "the enrollment in bundle.json", hashesTo(bundleHash));
+  if (!(status instanceof Error) && status.canonical && status.canonical !== bundleHash) {
+    await expectHistoryFile(`enrollment.${status.canonical}.json`, "the enrollment the chain records", hashesTo(status.canonical));
+  }
+  const servedManifest = canonicalize({ manifest: current.bundle.manifest.manifest, signatures: current.bundle.manifest.signatures ?? {} });
+  await expectHistoryFile(manifestFileName(current.bundle.enrollment, current.bundle.manifest), "the manifest in bundle.json", (text) => {
+    try {
+      const parsed = JSON.parse(text);
+      return canonicalize({ manifest: parsed.manifest, signatures: parsed.signatures ?? {} }) === servedManifest;
+    } catch {
+      return false;
+    }
+  });
   const manifest = current.bundle.manifest.manifest;
   const paths = options.paths?.length ? options.paths : ["/", ...Object.keys(manifest.files)];
   const trustedRoot =
@@ -200,6 +231,7 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
     previousBundle: previous ? previous.verdict : "none",
     enrollment,
     trustedRoot,
+    history,
     paths: await mapLimit(paths, 8, (p) => checkPath(origin, manifest, p)),
   };
 }

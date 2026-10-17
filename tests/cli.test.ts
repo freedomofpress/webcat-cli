@@ -20,7 +20,6 @@ import {
   hexToBase64Url,
   parseInteger,
   toBase64Url,
-  validateCasUrl,
   validateMaxAge,
 } from "../src/utils";
 
@@ -72,12 +71,6 @@ describe("integer and range validation", () => {
     expect(() => validateMaxAge(60 * 60 * 24 * 30, "max_age")).not.toThrow();
   });
 
-  it("validates CAS URLs", () => {
-    expect(() => validateCasUrl("notaurl", "cas_url")).toThrow("cas_url must be a valid URL");
-    expect(() => validateCasUrl("http://example.com", "cas_url")).toThrow("cas_url must use https://");
-    expect(() => validateCasUrl("https://", "cas_url")).toThrow("cas_url must be a valid URL");
-    expect(() => validateCasUrl("https://example.com", "cas_url")).not.toThrow();
-  });
 });
 
 const real = await sigsumEnrollmentFromPolicy(SIGSUM_TEST_POLICY); // a genuine compiled policy plus its logs map
@@ -93,7 +86,6 @@ describe("enrollment helpers", () => {
       signers: [baseSigner],
       threshold: 1,
       maxAge: 1_000_000,
-      casUrl: "https://example.com",
       logs: real.logs,
     });
 
@@ -114,7 +106,6 @@ describe("enrollment helpers", () => {
         signers: [],
         threshold: 1,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
         logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
@@ -126,7 +117,6 @@ describe("enrollment helpers", () => {
         signers: [baseSigner, baseSigner],
         threshold: 1,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
         logs: real.logs,
       }),
     ).rejects.toThrow("enrollment.signers must not contain duplicates");
@@ -138,7 +128,6 @@ describe("enrollment helpers", () => {
         signers: [baseSigner, secondSigner],
         threshold: 3,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
         logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
@@ -150,22 +139,10 @@ describe("enrollment helpers", () => {
         signers: [baseSigner],
         threshold: 0,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
         logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
-    await expect(
-      buildEnrollmentObject({
-        type: "sigsum",
-        policy: real.policy,
-        signers: [baseSigner],
-        threshold: 1,
-        maxAge: 60 * 60 * 24 * 8,
-        casUrl: "http://example.com",
-        logs: real.logs,
-      }),
-    ).rejects.toThrow("enrollment.cas_url must use https://");
   });
 
   it("builds sigstore enrollment objects", async () => {
@@ -272,28 +249,6 @@ describe("enrollment helpers", () => {
         max_age: 1_000_000,
       }, { authoring: true }),
     ).toThrow("enrollment.claims keys must be OIDs");
-  });
-});
-
-describe("CAS resolution", () => {
-  it("lets an auditor walk from a log entry's checksum to the manifest", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
-    const cwd = process.cwd();
-    process.chdir(dir);
-    try {
-      const canonicalManifest = JSON.stringify({ app: "demo" });
-      const { publishManifestToCas } = await import("../src/cas");
-      await publishManifestToCas(canonicalManifest);
-      // The Sigsum leaf checksum is sha256(message) where message = sha256(manifest); both are CAS object names.
-      const message = createHash("sha256").update(canonicalManifest).digest();
-      const leafChecksumHex = createHash("sha256").update(message).digest("hex");
-      const storedMessage = await readFile(path.join(dir, "cas", leafChecksumHex));
-      expect(storedMessage.equals(message)).toBe(true);
-      expect(await readFile(path.join(dir, "cas", storedMessage.toString("hex")), "utf8")).toBe(canonicalManifest);
-    } finally {
-      process.chdir(cwd);
-      await rm(dir, { recursive: true, force: true });
-    }
   });
 });
 
@@ -513,9 +468,10 @@ describe("init", () => {
   it("writes a config, a policy and a valid enrollment from flags alone", async () => {
     const { runInit, CSP_PRESETS } = await import("../src/init");
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-"));
-    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)], casUrl: "https://example.org/cas/" });
+    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)] });
     const config = JSON.parse(await readFile(path.join(dir, "webcat.config.json"), "utf8"));
-    expect(config.app).toBe("https://example.org");
+    expect(config.app).toBeUndefined(); // deprecated: init writes source/artifact instead
+    expect(config.default_index).toBe("index.html");
     expect(config.default_csp).toBe(CSP_PRESETS.static.csp);
     const enrollment = await loadEnrollment(path.join(dir, ".well-known/webcat/enrollment.json"));
     expect(enrollment.type).toBe("sigsum");
@@ -546,6 +502,40 @@ describe("trusted root drift", () => {
       "new transparency log https://log2026-1 (valid from 2026) is not in the enrollment's trusted root",
       "new timestamp authority https://tsa (valid from 2025) is not in the enrollment's trusted root",
     ]);
+  });
+});
+
+describe("history", () => {
+  it("writes hash-named files once, rotates bundle-prev on enrollment change, and flags edits since a ref", async () => {
+    const { checkHistory, enrollmentFileName, manifestFileName, publishBundle, publishEnrollment, writeOnce } = await import("../src/history");
+    const { execFileSync } = await import("node:child_process");
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-history-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    const dir = path.join(repo, ".well-known/webcat");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const document = { manifest: bundle.manifest, signatures: bundle.signatures };
+    await publishEnrollment(dir, enrollment);
+    const written = await publishBundle(dir, enrollment, document);
+    expect(written.map((f) => path.basename(f)).sort()).toEqual([manifestFileName(enrollment, document), "bundle.json"].sort());
+    expect(await checkHistory(dir)).toEqual([]);
+    expect(await writeOnce(dir, enrollmentFileName(enrollment), "different\n").catch((e) => e.message)).toContain("must not change");
+    git("add", "."); git("commit", "-q", "-m", "first");
+    // A new enrollment: the old bundle becomes bundle-prev.json; the old hash files stay.
+    const changed = { ...enrollment, max_age: enrollment.max_age - 1 };
+    await publishEnrollment(dir, changed);
+    const written2 = await publishBundle(dir, changed, document);
+    expect(written2.map((f) => path.basename(f))).toContain("bundle-prev.json");
+    expect(await checkHistory(dir, "HEAD")).toEqual([]);
+    // Editing or deleting a hash-named file is caught against the ref and by the name check.
+    await writeFile(path.join(dir, enrollmentFileName(enrollment)), JSON.stringify({ ...enrollment, max_age: 5 }));
+    await rm(path.join(dir, manifestFileName(enrollment, document)));
+    const problems = await checkHistory(dir, "HEAD");
+    expect(problems.join("\n")).toMatch(/content hashes to .* not to its name/);
+    expect(problems.join("\n")).toMatch(/modified since HEAD/);
+    expect(problems.join("\n")).toMatch(/deleted since HEAD/);
+    await rm(repo, { recursive: true, force: true });
   });
 });
 

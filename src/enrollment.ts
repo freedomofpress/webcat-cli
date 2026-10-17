@@ -1,4 +1,4 @@
-import { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
+import { EnrollmentTypes, type SigsumEnrollment as LibrarySigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
 import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
 import { parseCompiledPolicy } from "@freedomofpress/sigsum/dist/compiledPolicy.js";
@@ -14,7 +14,6 @@ import {
   readText,
   toBase64Url,
   validateAll,
-  validateCasUrl,
   validateMaxAge,
 } from "./utils.js";
 
@@ -30,7 +29,10 @@ function compiledPolicyLogs(policy: unknown): string[] | Error {
   }
 }
 
-export { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment };
+// cas_url is gone from the spec (auditing lives in the well-known directory); old enrollments may still carry it.
+export type SigsumEnrollment = Omit<LibrarySigsumEnrollment, "cas_url"> & { cas_url?: string };
+export type Enrollment = SigsumEnrollment | SigstoreEnrollment;
+export { EnrollmentTypes, type SigstoreEnrollment };
 
 export const parseSignerKey = (value: string): string => toBase64Url(decodeKeyMaterial(value, "--signer"));
 
@@ -51,7 +53,7 @@ export const signerFromValue = async (value: string): Promise<string> =>
 // CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated enrollment.
 export async function buildEnrollmentObject(
   o:
-    | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; casUrl: string; logs?: Record<string, string> }
+    | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; logs?: Record<string, string> }
     | { type: "sigstore"; trustedRoot: unknown; claims: unknown; maxAge: number | string },
 ): Promise<Enrollment> {
   const max_age = parseInteger(o.maxAge, "--max-age");
@@ -59,12 +61,12 @@ export async function buildEnrollmentObject(
     return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
   }
   const signers = await Promise.all(o.signers.map(signerFromValue));
-  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs }, { authoring: true });
+  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, logs: o.logs }, { authoring: true });
 }
 
 // The extension's validators decide what an enrollment is; that is all that is checked on anything read from disk or
 // the network, so the CLI accepts exactly what browsers accept. When authoring (create, init) the CLI adds guards the
-// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, CAS URL, max_age range, logs <-> policy.
+// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, max_age range, logs <-> policy.
 export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {}): Enrollment {
   const e = ensureObject(parsed, "enrollment");
   if (e.type !== EnrollmentTypes.Sigsum && e.type !== EnrollmentTypes.Sigstore) {
@@ -98,7 +100,7 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
   const policyLogs = authoring ? compiledPolicyLogs(enrollment.policy) : [];
   const listedLogs = typeof enrollment.logs === "object" && enrollment.logs !== null ? Object.entries(enrollment.logs) : [];
   validateAll([
-    () => check(validateSigsumEnrollment(enrollment), "enrollment"),
+    () => check(validateSigsumEnrollment(enrollment as LibrarySigsumEnrollment), "enrollment"),
     encodable,
     ...(authoring
       ? [
@@ -108,7 +110,6 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
               throw invalid("enrollment.signers must not contain duplicates");
             }
           },
-          () => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url"),
           () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
           () => {
             if (policyLogs instanceof Error) {

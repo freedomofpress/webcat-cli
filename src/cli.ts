@@ -2,8 +2,9 @@
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
+import { spawn } from "node:child_process";
+import path from "node:path";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
-import { publishManifestToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
   buildManifest,
@@ -16,6 +17,8 @@ import {
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
 import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
 import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
+import { gitDirtyFiles, gitRoot, gitStage, gitTagAtHead, gitTagExists } from "./git.js";
+import { WELL_KNOWN_DIR, checkHistory, enrollmentFileName, publishBundle, writeOnce } from "./history.js";
 import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
@@ -78,6 +81,13 @@ function requireOption<T>(value: T | undefined, flag: string, context: string): 
   }
   return value;
 }
+// Writes are staged in git when inside a repository (or committed on request); never silently.
+async function stageInGit(paths: string[], git: boolean | undefined, commitMessage?: string): Promise<void> {
+  if (git === false || !(await gitRoot())) return;
+  await gitStage(paths, commitMessage);
+  log(commitMessage ? `committed: ${commitMessage}` : `staged in git: ${paths.map((p) => path.relative(process.cwd(), p)).join(", ")}`);
+}
+
 // Reports every missing flag at once.
 const requireOptions = (context: string, ...flags: Array<[value: unknown, flag: string]>): void =>
   validateAll(flags.map(([value, flag]) => () => requireOption(value, flag, context)));
@@ -115,6 +125,9 @@ program
   .command("init")
   .description("Set up a site for WEBCAT: writes webcat.config.json, trust_policy and .well-known/webcat/enrollment.json, then prints the next steps")
   .option("--origin <url>", "Site origin, e.g. https://example.org")
+  .option("--source <url>", "Git repository the site is built from (default: the origin remote)")
+  .option("--artifact <template>", "Release archive URL template containing ${version}")
+  .option("--no-git", "Do not stage written files in git")
   .option("--app-version <string>", "Version string for this release (default: 1.0.0)")
   .addOption(typeOption("Enrollment"))
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
@@ -123,7 +136,6 @@ program
   .addOption(new Option("--signer <key>", "Existing signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
   .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
-  .addOption(new Option("--cas-url <url>", "Where Sigsum proofs are published").helpGroup(SIGSUM))
   .addOption(new Option("--identity <value>", "Signing identity").helpGroup(SIGSTORE))
   .addOption(new Option("--issuer <url>", "OIDC issuer").helpGroup(SIGSTORE))
   .option("-d, --dir <path>", "Directory to write into", ".")
@@ -197,7 +209,8 @@ const enrollmentCreate = enrollment
   .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
   .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
-  .addOption(new Option("-c, --cas-url <url>", "CAS https URL").helpGroup(SIGSUM))
+  .addOption(new Option("-c, --cas-url <url>").hideHelp()) // removed from the spec; accepted and ignored
+  .option("--no-git", "Do not stage the written files in git")
   .addOption(new Option("--trusted-root <path>", "Sigstore trusted root file").helpGroup(SIGSTORE))
   .addOption(new Option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF").helpGroup(SIGSTORE))
   .addOption(new Option("--identity <value>", `Signing identity (SAN, OID ${SAN_OID})`).helpGroup(SIGSTORE))
@@ -218,8 +231,8 @@ enrollmentCreate.action(async (options) => {
       [options.signer, "--signer"],
       [options.threshold, "--threshold"],
       [options.maxAge, "--max-age"],
-      [options.casUrl, "--cas-url"],
     );
+    if (options.casUrl) log("Warning: --cas-url is no longer part of enrollments (the well-known directory carries the history); ignored");
     const policyText = await readText(options.policyFile, "policy");
     enrollmentObject = await buildEnrollmentObject({
       type: "sigsum",
@@ -227,7 +240,6 @@ enrollmentCreate.action(async (options) => {
       signers: options.signer,
       threshold: options.threshold,
       maxAge: options.maxAge,
-      casUrl: options.casUrl,
     });
   } else {
     // Explicit --claim first, then legacy aliases, then named flags; later entries win per OID.
@@ -260,10 +272,16 @@ enrollmentCreate.action(async (options) => {
     enrollmentObject = await buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
-  const json = JSON.stringify(enrollmentObject, null, 2);
-  const { hash, filePath } = await writeCasObject(json);
-  log(`Saved enrollment to ${filePath} (sha256=${hash}).`);
+  const json = JSON.stringify(enrollmentObject, null, 2) + "\n";
   await writeOutput(options.output, json);
+  if (options.output) {
+    // The hash-named copy lives next to the enrollment: the history auditors read (spec server.md section 1).
+    const dir = path.dirname(options.output);
+    const name = enrollmentFileName(enrollmentObject);
+    const added = await writeOnce(dir, name, json);
+    log(`${added ? "wrote" : "already present"} ${path.join(dir, name)}`);
+    await stageInGit([options.output, path.join(dir, name)], options.git);
+  }
 });
 
 enrollment
@@ -304,6 +322,10 @@ enrollment
       log(`Warning: ${bareDomain(domain)} serves no enrollment; oracles will vote to unenroll it.`);
     } else {
       log(`Served enrollment hash: ${served.hash}`);
+      // Auditors read the enrollment by its hash (spec server.md section 1); warn until the spec is final.
+      const historyUrl = `https://${bareDomain(domain)}/${WELL_KNOWN_DIR}/enrollment.${served.hash}.json`;
+      const history = await fetch(historyUrl).catch(() => null);
+      if (!history?.ok) log(`Warning: ${historyUrl} is not served; auditors will need it (webcat bundle create and init write it)`);
       if (options.enrollment) {
         const local = enrollmentHashHex(await loadEnrollment(options.enrollment));
         if (local !== served.hash) {
@@ -389,6 +411,8 @@ manifest
   .option("-p, --policy-file <path>", "Sigsum policy file for timestamps", "trust_policy")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
+  .option("--archive <path>", "Also write the release archive (gzip tar of the directory) that the artifact URL will serve")
+  .option("--skip-git-checks", "Do not require version to be the tag at HEAD when source is set")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
     const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
@@ -397,7 +421,25 @@ manifest
       scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: options.exclude }),
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
+    if (config.source && !options.skipGitChecks && (await gitRoot())) {
+      // A manifest with source claims the files build from the repository at tag `version`: HEAD must be that tag.
+      const tag = await gitTagAtHead();
+      if (tag !== config.version) {
+        const exists = await gitTagExists(config.version);
+        throw invalid(
+          `config.version ${config.version} must be the git tag at HEAD because config.source is set (HEAD is ${tag ? `tagged ${tag}` : "not tagged"}${exists ? "" : `, and no tag ${config.version} exists`}); tag the release or pass --skip-git-checks`,
+        );
+      }
+    }
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
+    if (options.archive) {
+      await new Promise<void>((resolve, reject) => {
+        const tar = spawn("tar", ["-czf", options.archive, "-C", options.directory, "--exclude=./.well-known/webcat", "."], { stdio: ["ignore", "inherit", "inherit"] });
+        tar.on("error", (err) => reject(external(`failed to run tar: ${causeOf(err)}`)));
+        tar.on("exit", (code) => (code === 0 ? resolve() : reject(external(`failed to run tar: exit code ${code}`))));
+      });
+      log(`wrote ${options.archive}; publish it where ${config.artifact ?? "the artifact URL"} resolves for version ${config.version}`);
+    }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
 
@@ -422,9 +464,16 @@ manifest
   .option("--oidc-token <value>", "Explicit OIDC ID token to use for Sigstore signing")
   .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
   .option("--no-open-browser", "Do not open a browser window for device authorization")
+  .option("--skip-git-checks", "Sign even with uncommitted changes when the manifest has source")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(async (options, command: Command) => {
     const document = await loadManifestDocument(options.input);
+    if (document.manifest.source && !options.skipGitChecks && (await gitRoot())) {
+      const dirty = await gitDirtyFiles();
+      if (dirty.length) {
+        throw invalid(`the working tree has uncommitted changes and the manifest has source; commit or stash first (or pass --skip-git-checks):\n  - ${dirty.join("\n  - ")}`);
+      }
+    }
     // The default enrollment path may simply not exist; an explicit one must.
     const enrollment = await loadEnrollment(options.enrollment).catch((err) => {
       if (command.getOptionValueSource("enrollment") === "default" && err instanceof CliError && /not found/.test(err.message)) {
@@ -493,11 +542,6 @@ manifest
         throw invalid(`the signed manifest does not verify against ${options.enrollment}: ${describeWebcatError(result)}; nothing written`);
       }
       log(partial ? `Signed: ${partial.details?.[0]} of ${partial.details?.[1]} required signatures present, sign again with another enrolled key` : `Verified against ${options.enrollment}: ${describeValidity(result)}`);
-    }
-    if (options.type === "sigsum") {
-      const { checksum, manifest: canonical } = await publishManifestToCas(canonicalizeManifestBody(document));
-      log(`Saved Sigsum checksum payload to ${checksum.filePath} (sha256=${checksum.hash}).`);
-      log(`Saved canonical manifest to ${canonical.filePath} (sha256=${canonical.hash}).`);
     }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
@@ -574,6 +618,9 @@ program
       process.stdout.write("Trusted root:    WARNING, re-enroll before signing again\n");
       report.trustedRoot.forEach((line) => process.stdout.write(`  - ${line}\n`));
     }
+    // Warning only until the auditing spec is final: no site serves these files yet.
+    process.stdout.write(`History:         ${report.history.length ? `WARNING, ${report.history.length} file(s) auditors will need are missing` : "hash-named files served"}\n`);
+    report.history.forEach((line) => process.stdout.write(`  - ${line}\n`));
     const failed = report.paths.filter((p) => p.problems.length > 0);
     process.stdout.write(`Paths:           ${report.paths.length} checked, ${failed.length} with problems\n`);
     for (const { path, problems } of failed) {
@@ -596,14 +643,43 @@ program
   .command("bundle")
   .description("Combine an enrollment and a signed manifest into a bundle")
   .command("create")
-  .description("Create a bundle from enrollment and a signed manifest")
-  .option("-e, --enrollment <path>", "Enrollment JSON file", ".well-known/webcat/enrollment.json")
+  .description("Publish a signed manifest: writes bundle.json and the hash-named manifest file into the well-known directory, keeps the previous bundle when the enrollment changed")
+  .option("-e, --enrollment <path>", "Enrollment JSON file", `${WELL_KNOWN_DIR}/enrollment.json`)
   .option("-m, --manifest <path>", "Signed manifest JSON file", "manifest.signed.json")
-  .option("-o, --output <path>", "Write bundle JSON to a file")
+  .option("-d, --dir <path>", "Well-known directory to publish into", WELL_KNOWN_DIR)
+  .option("--commit", "Commit the written files")
+  .option("--no-git", "Do not stage the written files in git")
+  .option("-o, --output <path>", "Only write the bundle to this file (no history files)")
   .action(async (options) => {
     const [enrollment, document] = await Promise.all([loadEnrollment(options.enrollment), loadManifestDocument(options.manifest)]);
-    const bundleDocument = { enrollment, manifest: document.manifest, signatures: document.signatures };
-    await writeOutput(options.output, JSON.stringify(bundleDocument, null, 2));
+    if (options.output) {
+      await writeOutput(options.output, JSON.stringify({ enrollment, manifest: document.manifest, signatures: document.signatures }, null, 2));
+      return;
+    }
+    const written = await publishBundle(options.dir, enrollment, document);
+    written.forEach((f) => log(`wrote ${f}`));
+    await stageInGit(written, options.git, options.commit ? `webcat: publish manifest ${document.manifest.version}` : undefined);
+  });
+
+// ---------------------------------------------------------------------------
+// history
+
+program
+  .command("history")
+  .description("The well-known directory as an append-only ledger")
+  .command("check")
+  .description("Check every hash-named file hashes to its name, the current pointers match them, and nothing was modified or deleted since a git ref (exit 1 on problems)")
+  .argument("[ref]", "Git ref to compare against (e.g. HEAD, origin/main); default: no git comparison")
+  .option("-d, --dir <path>", "Well-known directory", WELL_KNOWN_DIR)
+  .action(async (ref: string | undefined, options) => {
+    const problems = await checkHistory(options.dir, ref);
+    if (problems.length === 0) {
+      process.stdout.write(`OK: ${options.dir} is consistent${ref ? ` and append-only since ${ref}` : ""}\n`);
+      return;
+    }
+    process.stdout.write(`${problems.length} problem${problems.length > 1 ? "s" : ""} in ${options.dir}:\n`);
+    problems.forEach((p) => process.stdout.write(`  - ${p}\n`));
+    process.exitCode = 1;
   });
 
 // Exit codes: 0 ok, 1 negative verification result, 2 invalid input or usage, 3 external failure (see utils.ts).

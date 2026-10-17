@@ -144,17 +144,6 @@ export function validateMaxAge(maxAge: number, name: string): void {
   }
 }
 
-export function validateCasUrl(urlString: string, name: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(urlString);
-  } catch (err) {
-    throw invalid(`${name} must be a valid URL: ${causeOf(err)}`);
-  }
-  if (parsed.protocol !== "https:") {
-    throw invalid(`${name} must use https://`);
-  }
-}
 
 export function ensureObject(value: unknown, name: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

@@ -1,6 +1,6 @@
 // `webcat init`: the few answers a site needs, written as the files the other commands expect,
 // then the next steps printed. Every answer can be given as a flag, so CI never prompts.
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -8,6 +8,8 @@ import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
 import { ISSUER_V2_OID, SAN_OID, fetchCommunityTrustedRoot } from "./sigstore.js";
+import { gitRemote, gitRoot, gitStage, gitTagAtHead } from "./git.js";
+import { WELL_KNOWN_DIR, publishEnrollment } from "./history.js";
 import { causeOf, invalid, log, readText, validateAll } from "./utils.js";
 
 export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
@@ -47,7 +49,9 @@ export interface InitOptions {
   policy?: string; // test, production, or a path to a policy file
   keys?: string | number; // generate this many Sigsum keys instead of passing --signer
   threshold?: string | number;
-  casUrl?: string;
+  source?: string; // git repository URL; "" for closed source
+  artifact?: string; // release archive URL template with ${version}
+  git?: boolean; // stage written files (default when inside a repository)
   identity?: string;
   issuer?: string;
   dir: string;
@@ -81,7 +85,11 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
   };
   try {
     const origin = options.origin ?? (await ask("origin", "origin (https://example.org)"));
-    const version = options.version ?? (await ask("app-version", "version of this release", "1.0.0"));
+    // git answers first: the remote is the source, the tag at HEAD is the version.
+    const remote = (await gitRemote(options.dir)) ?? "";
+    const source = options.source ?? (await ask("source", "source repository (git URL for reproducible builds, empty for closed source)", remote));
+    const artifact = options.artifact ?? (await ask("artifact", "artifact (release archive URL template with ${version}, empty if none)", ""));
+    const version = options.version ?? (await ask("app-version", "version of this release (a git tag when source is set)", (await gitTagAtHead(options.dir)) ?? "1.0.0"));
     const type = (options.type ?? (await choose("type", [["sigsum", "Sigsum: you hold the signing keys"], ["sigstore", "Sigstore: sign from CI with an OIDC identity"]], "sigsum"))) as "sigsum" | "sigstore";
     let csp = options.csp;
     if (!csp) {
@@ -106,12 +114,11 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
           .filter(Boolean);
       }
       rest.threshold ??= await ask("threshold", "threshold (signatures required)", "1");
-      rest.casUrl ??= await ask("cas-url", "cas-url (where Sigsum proofs are published)", `${origin.replace(/\/+$/, "")}/cas/`);
     } else {
       rest.identity ??= await ask("identity", "identity (signing identity, e.g. an email or a GitHub workflow URL)");
       rest.issuer ??= await ask("issuer", "issuer (OIDC issuer)", "https://token.actions.githubusercontent.com");
     }
-    return { ...rest, origin, version, type, csp, maxAge };
+    return { ...rest, origin, version, type, csp, maxAge, source, artifact };
   } finally {
     rl?.close();
   }
@@ -173,7 +180,6 @@ export async function runInit(options: InitOptions): Promise<void> {
           signers,
           threshold: a.threshold ?? 1,
           maxAge: a.maxAge,
-          casUrl: a.casUrl ?? "",
         })
       : await buildEnrollmentObject({
           type: "sigstore",
@@ -182,16 +188,34 @@ export async function runInit(options: InitOptions): Promise<void> {
           maxAge: a.maxAge,
         });
 
-  const config = { app: a.origin, version: a.version, default_csp: a.csp, default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
+  const config = {
+    ...(a.source ? { source: a.source } : {}),
+    ...(a.artifact ? { artifact: a.artifact } : {}),
+    version: a.version,
+    default_csp: a.csp,
+    default_index: "index.html",
+    default_fallback: "/index.html",
+    wasm: [],
+    extra_csp: {},
+  };
+  if (!a.source && !a.artifact) log("Warning: without source or artifact, auditors cannot reproduce or fetch this site's releases");
   const files: Array<[string, string]> = [
     ["webcat.config.json", JSON.stringify(config, null, 2) + "\n"],
     ...(a.type === "sigsum" ? [["trust_policy", policyText] as [string, string]] : []),
-    [".well-known/webcat/enrollment.json", JSON.stringify(enrollment, null, 2) + "\n"],
   ];
-  await mkdir(`${a.dir}/.well-known/webcat`, { recursive: true });
+  const written: string[] = [];
   for (const [name, contents] of files) {
     await writeFile(`${a.dir}/${name}`, contents);
+    written.push(`${a.dir}/${name}`);
     log(`wrote ${name}`);
+  }
+  for (const file of await publishEnrollment(`${a.dir}/${WELL_KNOWN_DIR}`, enrollment)) {
+    written.push(file);
+    log(`wrote ${path.relative(a.dir, file)}`);
+  }
+  if (a.git !== false && (await gitRoot(a.dir))) {
+    await gitStage(written.map((f) => path.resolve(f)), undefined, a.dir);
+    log("staged in git; commit them with your release");
   }
   const host = new URL(a.origin).host;
   const key = keyPaths[0] ?? (a.signer ?? []).find((s) => s.endsWith(".pub")) ?? "<private key, or .pub for ssh-agent>";
@@ -205,18 +229,19 @@ export async function runInit(options: InitOptions): Promise<void> {
   0. Publish this DNS record so the production logs accept your submissions:
        _sigsum_v1.${host}. IN TXT "${tokenHex}"`
     : "";
-  const cas = a.type === "sigsum" ? `\n  7. Serve the cas/ directory that manifest sign writes at ${a.casUrl} (files named by their sha256)` : "";
   stdout.write(`
 Next steps${dns}
-  1. Serve the .well-known/webcat/ directory at ${a.origin}/.well-known/webcat/
+  1. Serve ${WELL_KNOWN_DIR}/ at ${a.origin}/${WELL_KNOWN_DIR}/
   2. Send this header on every response, byte for byte:
        Content-Security-Policy: ${a.csp}
-  3. Build the site, then generate, sign and bundle the manifest:
-       webcat manifest generate${a.type === "sigsum" ? "" : " --type sigstore"} -d <build dir> -o manifest.json
+  3. Commit ${WELL_KNOWN_DIR}/: it is the site's history, and every file in it must stay published
+  4. Build the site, then generate, sign and bundle the manifest:
+       webcat manifest generate${a.type === "sigsum" ? "" : " --type sigstore"} -d <build dir> -o manifest.json${a.artifact ? " --archive <release archive>" : ""}
        ${sign}
-       webcat bundle create -o .well-known/webcat/bundle.json
-  4. Deploy, then check what visitors will see:   webcat site check ${host}
-  5. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}
-  6. Follow promotion on the chain:               webcat enrollment status ${host}${cas}
+       webcat bundle create --commit            # writes bundle.json and manifest.<type>.<hash>.json, commits them
+  5. Deploy with ${WELL_KNOWN_DIR}/ copied into the web root, then check what visitors and auditors will see:
+       webcat site check ${host}
+  6. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}
+  7. Follow promotion on the chain:               webcat enrollment status ${host}
 `);
 }
