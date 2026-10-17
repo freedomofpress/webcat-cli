@@ -15,7 +15,12 @@ async function git(args: string[], cwd?: string): Promise<string | null> {
 }
 
 export const gitRoot = (cwd?: string): Promise<string | null> => git(["rev-parse", "--show-toplevel"], cwd);
-export const gitRemote = (cwd?: string): Promise<string | null> => git(["remote", "get-url", "origin"], cwd);
+// The origin remote as a URL with a protocol, as the spec wants for `source`: scp-like git@host:path becomes ssh://.
+export const gitRemote = async (cwd?: string): Promise<string | null> => {
+  const url = await git(["remote", "get-url", "origin"], cwd);
+  const scp = url?.match(/^([^@/:]+@[^:/]+):(.+)$/);
+  return scp ? `ssh://${scp[1]}/${scp[2]}` : url;
+};
 export const gitTagAtHead = (cwd?: string): Promise<string | null> => git(["describe", "--tags", "--exact-match", "HEAD"], cwd);
 export const gitTagExists = async (tag: string, cwd?: string): Promise<boolean> => (await git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], cwd)) !== null;
 export const gitLatestTag = (cwd?: string): Promise<string | null> => git(["describe", "--tags", "--abbrev=0"], cwd);

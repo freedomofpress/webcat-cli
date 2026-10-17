@@ -154,6 +154,7 @@ export async function runInit(options: InitOptions): Promise<void> {
         : await readText(a.policy!, "policy");
   let signers = a.signer ?? [];
   let keyPaths: string[] = [];
+  const touched: string[] = []; // files changed besides the ones written below, staged together with them
   if (a.type === "sigsum" && Number(a.keys) > 0) {
     ({ signers, paths: keyPaths } = await generateSigsumKeys(a.dir, Number(a.keys)));
     keyPaths = keyPaths.map((p) => path.relative(process.cwd(), p));
@@ -162,6 +163,7 @@ export async function runInit(options: InitOptions): Promise<void> {
     if (!/^keys\/?$/m.test(gitignore)) {
       await appendFile(`${a.dir}/.gitignore`, `${gitignore && !gitignore.endsWith("\n") ? "\n" : ""}keys/\n`);
       log("added keys/ to .gitignore");
+      touched.push(`${a.dir}/.gitignore`);
     }
   }
   // Production logs only accept submissions carrying a token signed by a key published in the domain's DNS.
@@ -188,10 +190,11 @@ export async function runInit(options: InitOptions): Promise<void> {
           maxAge: a.maxAge,
         });
 
+  // With a source repository the release tag is the version, so the config does not pin one unless asked to.
   const config = {
     ...(a.source ? { source: a.source } : {}),
     ...(a.artifact ? { artifact: a.artifact } : {}),
-    version: a.version,
+    ...(!a.source || options.version !== undefined ? { version: a.version } : {}),
     default_csp: a.csp,
     default_index: "index.html",
     default_fallback: "/index.html",
@@ -203,7 +206,7 @@ export async function runInit(options: InitOptions): Promise<void> {
     ["webcat.config.json", JSON.stringify(config, null, 2) + "\n"],
     ...(a.type === "sigsum" ? [["trust_policy", policyText] as [string, string]] : []),
   ];
-  const written: string[] = [];
+  const written: string[] = [...touched];
   for (const [name, contents] of files) {
     await writeFile(`${a.dir}/${name}`, contents);
     written.push(`${a.dir}/${name}`);

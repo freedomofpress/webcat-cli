@@ -421,24 +421,31 @@ manifest
       scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: options.exclude }),
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
-    if (config.source && !options.skipGitChecks && (await gitRoot())) {
+    const inRepo = await gitRoot();
+    // With no version in the config, the release is whatever tag HEAD carries.
+    const tagAtHead = inRepo ? await gitTagAtHead() : null;
+    const version = config.version ?? tagAtHead;
+    if (!version) {
+      throw invalid("config.version is required: set it in webcat.config.json, or tag the commit being released");
+    }
+    if (config.source && !options.skipGitChecks && inRepo) {
       // A manifest with source claims the files build from the repository at tag `version`: HEAD must be that tag.
-      const tag = await gitTagAtHead();
-      if (tag !== config.version) {
-        const exists = await gitTagExists(config.version);
+      const tag = tagAtHead;
+      if (tag !== version) {
+        const exists = await gitTagExists(version);
         throw invalid(
-          `config.version ${config.version} must be the git tag at HEAD because config.source is set (HEAD is ${tag ? `tagged ${tag}` : "not tagged"}${exists ? "" : `, and no tag ${config.version} exists`}); tag the release or pass --skip-git-checks`,
+          `config.version ${version} must be the git tag at HEAD because config.source is set (HEAD is ${tag ? `tagged ${tag}` : "not tagged"}${exists ? "" : `, and no tag ${version} exists`}); tag the release or pass --skip-git-checks`,
         );
       }
     }
-    const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
+    const document: ManifestDocument = { manifest: buildManifest({ ...config, version }, scan, timestamp) };
     if (options.archive) {
       await new Promise<void>((resolve, reject) => {
         const tar = spawn("tar", ["-czf", options.archive, "-C", options.directory, "--exclude=./.well-known/webcat", "."], { stdio: ["ignore", "inherit", "inherit"] });
         tar.on("error", (err) => reject(external(`failed to run tar: ${causeOf(err)}`)));
         tar.on("exit", (code) => (code === 0 ? resolve() : reject(external(`failed to run tar: exit code ${code}`))));
       });
-      log(`wrote ${options.archive}; publish it where ${config.artifact ?? "the artifact URL"} resolves for version ${config.version}`);
+      log(`wrote ${options.archive}; publish it where ${config.artifact ?? "the artifact URL"} resolves for version ${version}`);
     }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });

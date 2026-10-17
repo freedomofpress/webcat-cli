@@ -9,7 +9,7 @@ import { causeOf, check, ensureObject, invalid, log, readJson, sha256, toBase64U
 // Provenance fields from the spec: source (git URL, version is a tag there) and artifact (release archive URL template).
 // `app` is deprecated and ignored by the extension; the library's interface says `name` and reads neither.
 export type ManifestContent = Omit<Manifest, "name"> & { app?: string; source?: string; artifact?: string };
-export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp">;
+export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "version"> & { version?: string }; // version may come from the release tag
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
 export interface ManifestDocument {
@@ -80,7 +80,10 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     optionalUrl("app", ["https:", "http:"]),
     optionalUrl("source", ["https:", "ssh:"]),
     optionalUrl("artifact", ["https:", "http:"], (u) => (u.includes("${version}") ? undefined : "must contain ${version}")),
-    ...["version", "default_csp", "default_index", "default_fallback"].map((key) => () => str(key)),
+    ...["default_csp", "default_index", "default_fallback"].map((key) => () => str(key)),
+    () => {
+      if (c.version !== undefined) str("version");
+    },
     () => {
       if (!Array.isArray(wasm) || !wasm.every((w) => typeof w === "string")) {
         throw invalid("config.wasm must be an array of strings");
@@ -98,7 +101,7 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     ...(c.app !== undefined ? { app: str("app") } : {}),
     ...(c.source !== undefined ? { source: str("source") } : {}),
     ...(c.artifact !== undefined ? { artifact: str("artifact") } : {}),
-    version: str("version"),
+    ...(c.version !== undefined ? { version: str("version") } : {}),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
     default_fallback: str("default_fallback"),
@@ -148,7 +151,7 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
   return result;
 }
 
-export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
+export function buildManifest(config: ManifestConfig & { version: string }, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
   const manifest: ManifestContent = {
     ...(config.app !== undefined ? { app: config.app } : {}),
     ...(config.source !== undefined ? { source: config.source } : {}),
