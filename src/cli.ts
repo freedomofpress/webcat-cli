@@ -181,7 +181,7 @@ csp
     process.stdout.write(`Policy: ${policy}\n\n`);
     const report = hintCsp(policy);
     process.stdout.write(formatCspReport(report));
-    if (report.groups.length) {
+    if (!report.compatible) {
       process.exitCode = 1;
     }
   });

@@ -14,6 +14,7 @@ export interface CspGroup {
 }
 
 export interface CspReport {
+  compatible: boolean; // the extension's validateCSP on the policy as given
   groups: CspGroup[]; // what must change, empty when compatible
   accepted: string[]; // accepted as is, with the docs' advice
   suggested: string;
@@ -48,7 +49,10 @@ const GROUPS: Record<string, Omit<CspGroup, "items">> = {
   plugins: { title: "Plugins", advice: ["object-src must be 'none'; plugins are not supported."], docs: "object-src" },
   defaultSrc: {
     title: "default-src",
-    advice: ["Only 'none' or 'self' is accepted. Prefer default-src 'none' and allow-list each directive explicitly; move other sources to the directive that needs them, if WEBCAT allows it there."],
+    advice: [
+      "Only 'none' or 'self' is accepted. Prefer default-src 'none' and allow-list each directive explicitly; move other sources to the directive that needs them, if WEBCAT allows it there.",
+      "'none' only counts on its own: next to other sources browsers ignore it, so default-src 'none' 'self' means 'self', and WEBCAT then requires script-src, style-src, object-src and worker-src.",
+    ],
     docs: "default-src",
   },
   missing: {
@@ -60,6 +64,7 @@ const GROUPS: Record<string, Omit<CspGroup, "items">> = {
     docs: "default-src and worker-src",
   },
   policies: { title: "Multiple policies", advice: ["A comma means several policies in one header. WEBCAT compares only the first and rejects the header: send exactly one policy."] },
+  other: { title: "Other", advice: ["Rejected by the extension's CSP validator."], docs: "the directive named above" },
 };
 
 export function hintCsp(csp: string): CspReport {
@@ -84,9 +89,11 @@ export function hintCsp(csp: string): CspReport {
     out.set("default-src", ["'none'"]);
   } else {
     const kept = keep("default-src", (s) => s === "'none'" || s === "'self'", () => "defaultSrc");
+    if (def.includes("'none'") && def.length > 1) add("defaultSrc", `default-src ${def.join(" ")}`);
     out.set("default-src", kept.length === 0 || (kept.includes("'none'") && kept.length > 1) ? ["'none'"] : kept);
   }
-  const strict = out.get("default-src")!.length === 1 && out.get("default-src")![0] === "'none'";
+  // As the extension reads it: 'none' only counts when it is the sole source.
+  const strict = def?.length === 1 && def[0] === "'none'";
 
   for (const dir of ["script-src", "script-src-elem"]) {
     if (d.has(dir)) {
@@ -159,15 +166,23 @@ export function hintCsp(csp: string): CspReport {
         list.some((s) => s.startsWith("script-src-attr")),
       ][i],
     );
-  const groups = Object.keys(GROUPS)
+  // The verdict is the extension's own validator on the policy as given; the groups only explain it.
+  let compatible = true;
+  try {
+    validateCSP(csp);
+  } catch (err) {
+    compatible = false;
+    if (Object.keys(items).length === 0) add("other", causeOf(err));
+  }
+  const groups = compatible ? [] : Object.keys(GROUPS)
     .filter((key) => items[key])
     .map((key) => ({ ...GROUPS[key], items: items[key], advice: key === "scriptInline" ? inlineAdvice(items[key]) : GROUPS[key].advice }));
-  return { groups, accepted, suggested };
+  return { compatible, groups, accepted, suggested };
 }
 
 export function formatCspReport(report: CspReport): string {
   const lines: string[] = [];
-  if (report.groups.length === 0) {
+  if (report.compatible) {
     lines.push("OK: WEBCAT-compatible as is");
   } else {
     const total = report.groups.reduce((n, g) => n + g.items.length, 0);
