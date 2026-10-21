@@ -274,7 +274,7 @@ Example – hash the provided manifest:
 
 ```sh
 npx webcat manifest hash -i examples/manifest.json
-# => NXdriZVILywdtSNWw0IR-fKmuT4u-vGL93H9CYdKYnA
+# => KC20rk9wEouC18wkosAM2I7-ANnIxdBNTw6NibRGh88
 ```
 
 Example – verify a bundle, or an enrollment plus a signed manifest:
