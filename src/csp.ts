@@ -189,14 +189,6 @@ export function formatCspReport(report: CspReport): string {
   return lines.join("\n") + "\n";
 }
 
-// The policy a site sends: the header, or a <meta http-equiv> tag as a fallback.
-export async function fetchSiteCsp(url: string): Promise<{ csp: string | null; from: string }> {
-  const response = await fetchOk(url, { redirect: "follow" });
-  const header = response.headers.get("content-security-policy");
-  if (header) return { csp: header, from: "Content-Security-Policy header" };
-  const html = await response.text();
-  const tag = html.match(/<meta\b[^>]*http-equiv=["']content-security-policy["'][^>]*>/i)?.[0];
-  const content = tag?.match(/content=(?:"([^"]*)"|'([^']*)')/i);
-  const csp = content?.[1] ?? content?.[2];
-  return csp ? { csp, from: "<meta http-equiv> tag (WEBCAT requires the header, the tag alone is not enough)" } : { csp: null, from: "none" };
-}
+// The policy a site sends in its header: the only place the extension reads one.
+export const fetchSiteCsp = async (url: string): Promise<string | null> =>
+  (await fetchOk(url, { redirect: "follow" })).headers.get("content-security-policy");

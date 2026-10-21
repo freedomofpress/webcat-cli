@@ -167,14 +167,16 @@ csp
   .action(async (input: string) => {
     let policy = input;
     if (/^https?:\/\//.test(input)) {
-      const site = await fetchSiteCsp(input);
-      if (!site.csp) {
-        process.stdout.write(`${input} sends no Content-Security-Policy. Start from a preset: webcat init picks one, or run: webcat csp hint "${CSP_PRESETS.static.csp}"\n`);
+      const header = await fetchSiteCsp(input);
+      if (!header) {
+        process.stdout.write(
+          `NOT OK: ${input} sends no Content-Security-Policy header. WEBCAT only reads the header and cannot support a policy set in a <meta> tag.\n` +
+            `Start from a preset (webcat init picks one), or check a policy directly: webcat csp hint "${CSP_PRESETS.static.csp}"\n`,
+        );
         process.exitCode = 1;
         return;
       }
-      process.stdout.write(`Read from ${site.from}\n`);
-      policy = site.csp;
+      policy = header;
     }
     process.stdout.write(`Policy: ${policy}\n\n`);
     const report = hintCsp(policy);
