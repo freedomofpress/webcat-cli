@@ -30,6 +30,8 @@ import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
 import { causeOf, ensureObject, external, invalid, log, sha256 } from "./utils.js";
 
 export { DEFAULT_FULCIO_URL, DEFAULT_REKOR_URL };
+export const DEFAULT_REKOR_V2_URL = "https://log2025-1.rekor.sigstore.dev";
+export const DEFAULT_TSA_URL = "https://timestamp.sigstore.dev";
 export const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
 export const SIGSTORE_OIDC_CLIENT_ID = "sigstore";
 export const SIGSTORE_OIDC_SCOPE = "openid email";
@@ -165,19 +167,31 @@ export async function fetchInteractiveOidcToken(options: OidcDeviceFlowOptions):
 export interface SigstoreSignOptions {
   bundleType: "message" | "dsse";
   fulcioUrl: string;
-  rekorUrl: string;
+  rekorUrl?: string;
+  rekorApiVersion: 1 | 2;
   tsaUrl?: string;
   identityProvider: IdentityProvider;
+}
+
+// Rekor v2 entries carry no signed integrated time, so verifiers need an RFC 3161 timestamp to anchor the signature.
+// v2 therefore always gets a TSA; v1 only when asked for one.
+export function sigstoreEndpoints(options: Pick<SigstoreSignOptions, "rekorUrl" | "tsaUrl" | "rekorApiVersion">): { rekorUrl: string; tsaUrl?: string } {
+  const v2 = options.rekorApiVersion === 2;
+  return {
+    rekorUrl: options.rekorUrl || (v2 ? DEFAULT_REKOR_V2_URL : DEFAULT_REKOR_URL),
+    tsaUrl: options.tsaUrl || (v2 ? DEFAULT_TSA_URL : undefined),
+  };
 }
 
 export async function signManifestWithSigstore(document: ManifestDocument, options: SigstoreSignOptions): Promise<void> {
   if (document.signatures && !Array.isArray(document.signatures)) {
     throw invalid("manifest.signatures already contains sigsum proofs, Sigstore bundles cannot be mixed in");
   }
+  const { rekorUrl, tsaUrl } = sigstoreEndpoints(options);
   const signer = new FulcioSigner({ fulcioBaseURL: options.fulcioUrl, identityProvider: options.identityProvider });
-  const witnesses: Witness[] = [new RekorWitness({ rekorBaseURL: options.rekorUrl })];
-  if (options.tsaUrl) {
-    witnesses.push(new TSAWitness({ tsaBaseURL: options.tsaUrl }));
+  const witnesses: Witness[] = [new RekorWitness({ rekorBaseURL: rekorUrl, majorApiVersion: options.rekorApiVersion })];
+  if (tsaUrl) {
+    witnesses.push(new TSAWitness({ tsaBaseURL: tsaUrl }));
   }
   const builder =
     options.bundleType === "dsse" ? new DSSEBundleBuilder({ signer, witnesses }) : new MessageSignatureBundleBuilder({ signer, witnesses });
