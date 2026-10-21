@@ -498,6 +498,10 @@ describe("csp hints", () => {
     expect(suggested).toContain("img-src *");
     expect(hintCsp("default-src 'none'; script-src 'self'; style-src 'self'").groups).toEqual([]);
     expect(hintCsp("default-src 'none', default-src 'self'").groups[0].title).toBe("Multiple policies");
+    // 'none' next to another source is not 'none' for the extension; the verdict comes from its validator.
+    const mixed = hintCsp("default-src 'none' 'self'");
+    expect(mixed.compatible).toBe(false);
+    expect(mixed.groups.map((g) => g.title)).toEqual(["default-src", "Missing directives"]);
   });
 });
 
