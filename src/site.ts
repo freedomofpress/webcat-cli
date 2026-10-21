@@ -6,7 +6,7 @@ import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type BundleDocument, describeValidity, parseBundleObject, verifyBundle } from "./bundle.js";
 import { bareDomain, enrollmentHashHex, fetchDomainStatus, fetchServedEnrollment } from "./chain.js";
 import { EnrollmentTypes } from "./enrollment.js";
-import type { ManifestContent } from "./manifest.js";
+import { type ManifestContent, isHostOnlyFile } from "./manifest.js";
 import { fetchCommunityTrustedRoot, trustedRootDrift } from "./sigstore.js";
 import { causeOf, describeWebcatError, external, sha256, toBase64Url } from "./utils.js";
 
@@ -109,16 +109,16 @@ async function checkPath(origin: string, manifest: ManifestContent, pathname: st
       return { path: pathname, problems };
     }
   }
-  if (response.status !== 200) {
-    problems.push(`HTTP ${response.status}`);
-  }
+  // The extension checks content, not status: a 404 fallback that matches is fine.
+  const status = response.status === 200 ? "" : `HTTP ${response.status}, `;
   const expected = expectedHash(manifest, pathname, isDocument);
   if (!expected) {
-    problems.push("not in manifest.files, the extension would deny it");
+    problems.push(`${status}not in manifest.files, the extension would deny it`);
   } else {
     const served = toBase64Url(sha256(new Uint8Array(await response.arrayBuffer())));
     if (served !== expected) {
-      problems.push(`content hash does not match the manifest: served ${served}, manifest ${expected}`);
+      problems.push(`${status}content does not match the manifest: served ${served}, manifest ${expected}`);
+      if (isHostOnlyFile(pathname)) problems.push(`hosts usually do not serve this file: regenerate the manifest with --exclude ${pathname.slice(1)}`);
     }
   }
   return { path: pathname, problems };
@@ -147,20 +147,22 @@ async function fetchBundle(url: string): Promise<{ bundle?: BundleDocument; verd
 }
 
 // ponytail: fixed-size worker pool; sites with thousands of files would want --path filters.
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>, onProgress?: (done: number, total: number) => void): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
+  let done = 0;
   await Promise.all(
     Array.from({ length: Math.min(limit, items.length) }, async () => {
       for (let i = next++; i < items.length; i = next++) {
         out[i] = await fn(items[i]);
+        onProgress?.(++done, items.length);
       }
     }),
   );
   return out;
 }
 
-export async function checkSite(domain: string, options: { chainApi: string; paths?: string[] }): Promise<SiteReport> {
+export async function checkSite(domain: string, options: { chainApi: string; paths?: string[]; onProgress?: (done: number, total: number) => void }): Promise<SiteReport> {
   const origin = `https://${bareDomain(domain)}`;
   const current = await fetchBundle(origin + defaults.bundlePath);
   if (!current) {
@@ -200,6 +202,6 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
     previousBundle: previous ? previous.verdict : "none",
     enrollment,
     trustedRoot,
-    paths: await mapLimit(paths, 8, (p) => checkPath(origin, manifest, p)),
+    paths: await mapLimit(paths, 8, (p) => checkPath(origin, manifest, p), options.onProgress),
   };
 }

@@ -8,6 +8,7 @@ import {
   ManifestDocument,
   buildManifest,
   canonicalizeManifestBody,
+  isHostOnlyFile,
   loadManifestConfig,
   loadManifestDocument,
   manifestHash,
@@ -398,6 +399,8 @@ manifest
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
+    const unserved = Object.keys(document.manifest.files).filter(isHostOnlyFile);
+    if (unserved.length) log(`Warning: hosts usually do not serve ${unserved.join(", ")}; exclude with ${unserved.map((p) => `--exclude ${p.slice(1)}`).join(" ")}`);
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
 
@@ -566,7 +569,9 @@ program
   .option("--path <path>", "Only check this path (repeatable); default: / plus every file in the manifest", collect)
   .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
   .action(async (domain: string, options) => {
-    const report = await checkSite(domain, { chainApi: options.chainApi, paths: options.path });
+    // Progress only on a terminal, so piped output stays clean.
+    const onProgress = process.stderr.isTTY ? (done: number, total: number) => process.stderr.write(`\rChecking paths: ${done}/${total}${done === total ? "\n" : ""}`) : undefined;
+    const report = await checkSite(domain, { chainApi: options.chainApi, paths: options.path, onProgress });
     process.stdout.write(`Bundle:          ${report.bundle}\n`);
     process.stdout.write(`Previous bundle: ${report.previousBundle}\n`);
     process.stdout.write(`Enrollment:      ${report.enrollment}\n`);

@@ -26,6 +26,20 @@ export interface DirectoryScanOptions {
   excludePaths?: string[];
 }
 
+// Build output hosts do not serve, so listing it makes the manifest unverifiable (per each host's docs; there is no standard).
+const HOST_ONLY_FILES = new Set([
+  "/CNAME", "/_config.yml", // GitHub Pages
+  "/_headers", "/_redirects", "/netlify.toml", // Netlify, Cloudflare Pages
+  "/_routes.json", "/_worker.js", // Cloudflare Pages
+  "/vercel.json", // Vercel
+  "/firebase.json", // Firebase Hosting
+  "/staticwebapp.config.json", // Azure Static Web Apps
+  "/customHttp.yml", // AWS Amplify
+]);
+// Plus any dot segment (.htaccess, ._*, .env, .git/) except .well-known/, which is served on purpose.
+export const isHostOnlyFile = (p: string): boolean =>
+  HOST_ONLY_FILES.has(p) || p.startsWith("/_next/__private/") || (p.includes("/.") && !p.startsWith("/.well-known/"));
+
 export const asLibraryManifest = (manifest: ManifestContent): Manifest => manifest as unknown as Manifest;
 
 const sortedEntries = <T>(record: Record<string, T>): Record<string, T> =>
