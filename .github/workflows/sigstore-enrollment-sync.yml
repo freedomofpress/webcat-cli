@@ -54,6 +54,7 @@ on:
         required: false
         default: ".well-known/webcat/bundle-prev.json"
 
+      # Node major tracks nodejs_22 in flake.nix; bump both together.
       node_version:
         description: "Node.js version for webcat-cli"
         type: string

@@ -23,10 +23,11 @@ on:
         required: false
         default: "chore/update-webcat-manifest"
         description: Branch to commit bundle to
+      # Node major tracks nodejs_22 in flake.nix; bump both together.
       node_version:
         type: string
         required: false
-        default: "20"
+        default: "22"
 
 permissions:
   contents: write

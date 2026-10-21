@@ -8,6 +8,7 @@ on:
         required: false
         default: ".well-known/webcat/manifest.json"
         description: Where to write the signed manifest
+      # Node major tracks nodejs_22 in flake.nix; bump both together.
       node_version:
         type: string
         required: false
