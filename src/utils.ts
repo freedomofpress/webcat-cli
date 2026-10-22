@@ -68,16 +68,6 @@ export function check(err: WebcatError | null, subject: string): void {
     throw invalid(`${subject}: ${describeWebcatError(err)}`);
   }
 }
-// The library reports per-bundle Sigstore exceptions through console.log; keep stdout pipeable.
-export async function withConsoleOnStderr<T>(fn: () => Promise<T>): Promise<T> {
-  const original = console.log;
-  console.log = (...args: unknown[]) => log(args.map(String).join(" "));
-  try {
-    return await fn();
-  } finally {
-    console.log = original;
-  }
-}
 
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const YEAR_SECONDS = 365 * 24 * 60 * 60;

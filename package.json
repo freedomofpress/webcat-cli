@@ -33,7 +33,7 @@
     "@freedomofpress/ics23": "^0.2.0",
     "@freedomofpress/sigstore-browser": "^0.1.15",
     "@freedomofpress/sigsum": "^0.4.0",
-    "@freedomofpress/webcat": "^3.0.1",
+    "@freedomofpress/webcat": "^3.1.0",
     "@sigstore/bundle": "^5.0.0",
     "@sigstore/sign": "^5.0.0",
     "@types/node": "^22.20.5",
