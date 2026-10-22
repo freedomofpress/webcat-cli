@@ -6,8 +6,7 @@ import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateCSP, validateManifest } from "@freedomofpress/webcat/webcat/validators";
 import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url, validateAll } from "./utils.js";
 
-// The CLI writes `app` where the library's interface says `name`; the extension reads neither.
-export type ManifestContent = Omit<Manifest, "name"> & { app: string };
+export type ManifestContent = Manifest;
 export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp">;
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
@@ -40,8 +39,6 @@ const HOST_ONLY_FILES = new Set([
 export const isHostOnlyFile = (p: string): boolean =>
   HOST_ONLY_FILES.has(p) || p.startsWith("/_next/__private/") || (p.includes("/.") && !p.startsWith("/.well-known/"));
 
-export const asLibraryManifest = (manifest: ManifestContent): Manifest => manifest as unknown as Manifest;
-
 const sortedEntries = <T>(record: Record<string, T>): Record<string, T> =>
   Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)));
 
@@ -52,7 +49,7 @@ const isRecordOfStrings = (value: unknown): value is Record<string, string> =>
 export function validateManifestContent(manifest: ManifestContent, subject = "manifest"): void {
   const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp ?? {}).map(([k, v]) => [`extra_csp['${k}']`, v])];
   validateAll([
-    () => check(validateManifest(asLibraryManifest(manifest)), subject),
+    () => check(validateManifest(manifest), subject),
     ...policies.map(([field, csp]) => () => {
       if (typeof csp !== "string") {
         throw invalid(`${subject}.${field} must be a CSP string`);

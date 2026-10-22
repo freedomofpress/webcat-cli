@@ -1,8 +1,8 @@
 // Explains what WEBCAT would reject in a CSP, grouped by what to do about it, following
 // docs.webcat.tech/webapp-developers/CSP.html, then proposes the nearest policy that passes the extension's validator.
 import { parseContentSecurityPolicy } from "@freedomofpress/webcat/webcat/parsers";
-import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
-import { causeOf, fetchOk } from "./utils.js";
+import { cspErrors } from "@freedomofpress/webcat/webcat/validators";
+import { fetchOk } from "./utils.js";
 
 export const CSP_DOCS = "https://docs.webcat.tech/webapp-developers/CSP.html";
 
@@ -151,11 +151,8 @@ export function hintCsp(csp: string): CspReport {
   }
 
   const suggested = [...out].map(([dir, sources]) => `${dir} ${sources.join(" ")}`).join("; ");
-  try {
-    validateCSP(suggested);
-  } catch (err) {
-    accepted.push(`the suggested policy still fails the validator (${causeOf(err)}); please report this.`);
-  }
+  const [suggestedError] = cspErrors(suggested);
+  if (suggestedError) accepted.push(`the suggested policy still fails the validator (${suggestedError}); please report this.`);
   // Fixed order (scripts first), and inline-script advice only for the sources that are actually present.
   const inlineAdvice = (list: string[]): string[] =>
     GROUPS.scriptInline.advice.filter((line, i) =>
@@ -167,13 +164,9 @@ export function hintCsp(csp: string): CspReport {
       ][i],
     );
   // The verdict is the extension's own validator on the policy as given; the groups only explain it.
-  let compatible = true;
-  try {
-    validateCSP(csp);
-  } catch (err) {
-    compatible = false;
-    if (Object.keys(items).length === 0) add("other", causeOf(err));
-  }
+  const errors = cspErrors(csp);
+  const compatible = errors.length === 0;
+  if (!compatible && Object.keys(items).length === 0) errors.forEach((e) => add("other", e));
   const groups = compatible ? [] : Object.keys(GROUPS)
     .filter((key) => items[key])
     .map((key) => ({ ...GROUPS[key], items: items[key], advice: key === "scriptInline" ? inlineAdvice(items[key]) : GROUPS[key].advice }));
