@@ -1,32 +1,37 @@
 #!/usr/bin/env node
 import { Command, CommanderError, Option } from "commander";
-import { canonicalize } from "./canonicalize.js";
-import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment.js";
-import { publishSigsumProofToCas, writeCasObject } from "./cas.js";
+import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
+import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
+import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
+import { publishManifestToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
   buildManifest,
   canonicalizeManifestBody,
+  isHostOnlyFile,
   loadManifestConfig,
   loadManifestDocument,
   manifestHash,
   scanDirectory,
 } from "./manifest.js";
-import { loadBundleDocument } from "./bundle.js";
+import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
+import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
+import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
+import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
-  DEFAULT_LIST_URL,
+  DEFAULT_LIST_ENDPOINT,
   WELL_KNOWN_PATH,
   type Oracle,
   bareDomain,
   enrollmentHashHex,
   fetchDomainStatus,
-  fetchListEntry,
+  fetchVerifiedList,
   fetchOracles,
   fetchServedEnrollment,
   submitObservation,
 } from "./chain.js";
-import { fetchTimestampFromPolicy, signManifestWithSigsum, sigsumEnrollmentFromPolicy, verifySigsumManifest } from "./sigsum.js";
+import { fetchTimestampFromPolicy, signManifestWithSigsum, sigsumEnrollmentFromPolicy } from "./sigsum.js";
 import {
   DEFAULT_FULCIO_URL,
   DEFAULT_REKOR_URL,
@@ -40,10 +45,27 @@ import {
   fetchCommunityTrustedRoot,
   fetchInteractiveOidcToken,
   signManifestWithSigstore,
+  signingBlockedBy,
   staticIdentityProvider,
-  verifySigstoreManifest,
+  trustedRootDrift,
 } from "./sigstore.js";
-import { CliError, OID_RE, ensureObject, external, hashPolicyBytes, invalid, log, readJson, readText, sha256, toBase64Url, writeOutput } from "./utils.js";
+import {
+  CliError,
+  OID_RE,
+  causeOf,
+  describeWebcatError,
+  ensureObject,
+  external,
+  hashPolicyBytes,
+  invalid,
+  log,
+  readJson,
+  readText,
+  sha256,
+  toBase64Url,
+  validateAll,
+  writeOutput,
+} from "./utils.js";
 import pkg from "../package.json" with { type: "json" };
 
 const collect = (value: string, previous: string[] = []): string[] => previous.concat(value);
@@ -57,6 +79,9 @@ function requireOption<T>(value: T | undefined, flag: string, context: string): 
   }
   return value;
 }
+// Reports every missing flag at once.
+const requireOptions = (context: string, ...flags: Array<[value: unknown, flag: string]>): void =>
+  validateAll(flags.map(([value, flag]) => () => requireOption(value, flag, context)));
 
 function parseClaim(value: string, previous: Record<string, string> = {}): Record<string, string> {
   const separator = value.indexOf("=");
@@ -82,20 +107,98 @@ const program = new Command()
   .configureOutput({ outputError: (str, write) => write(str.replace(/^error: /, "Error: ")) });
 
 // ---------------------------------------------------------------------------
+// init
+
+const SIGSUM = "Sigsum enrollment options:";
+const SIGSTORE = "Sigstore enrollment options:";
+
+program
+  .command("init")
+  .description("Set up a site for WEBCAT: writes webcat.config.json, trust_policy and .well-known/webcat/enrollment.json, then prints the next steps")
+  .option("--origin <url>", "Site origin, e.g. https://example.org")
+  .option("--app-version <string>", "Version string for this release (default: 1.0.0)")
+  .addOption(typeOption("Enrollment"))
+  .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
+  .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
+  .addOption(new Option("--policy <choice>", `Sigsum policy: ${Object.keys(SIGSUM_POLICIES).join(", ")}, or a policy file path`).helpGroup(SIGSUM))
+  .addOption(new Option("--signer <key>", "Existing signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
+  .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
+  .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
+  .addOption(new Option("--cas-url <url>", "Where Sigsum proofs are published").helpGroup(SIGSUM))
+  .addOption(new Option("--identity <value>", "Signing identity").helpGroup(SIGSTORE))
+  .addOption(new Option("--issuer <url>", "OIDC issuer").helpGroup(SIGSTORE))
+  .option("-d, --dir <path>", "Directory to write into", ".")
+  .action(async (options, command: Command) => {
+    // Flags with defaults are only "answered" when given explicitly; otherwise init asks (and uses the default off a terminal).
+    const explicit = (name: string) => (command.getOptionValueSource(name) === "cli" ? options[name] : undefined);
+    await runInit({
+      ...options,
+      version: options.appVersion,
+      type: explicit("type"),
+      threshold: explicit("threshold"),
+      maxAge: explicit("maxAge"),
+      csp: options.csp && (CSP_PRESETS[options.csp]?.csp ?? options.csp),
+    });
+  });
+
+// ---------------------------------------------------------------------------
+// csp
+
+const csp = program.command("csp").description("Content Security Policy helpers");
+
+csp
+  .command("check")
+  .description("Answer whether a policy satisfies WEBCAT's CSP rules (exit 1 if not)")
+  .argument("<policy>", "The policy string, quoted")
+  .action((policy: string) => {
+    try {
+      validateCSP(policy);
+      process.stdout.write("OK: WEBCAT-compatible\n");
+    } catch (err) {
+      process.stdout.write(`NOT OK: ${causeOf(err)}\n  run: webcat csp hint '<policy>' for what to change\n`);
+      process.exitCode = 1;
+    }
+  });
+
+csp
+  .command("hint")
+  .description("Explain what WEBCAT would reject in a policy, with the documented workaround for each, and suggest the nearest compatible policy")
+  .argument("<policy-or-url>", "A policy string, or an https:// page to read the policy from")
+  .action(async (input: string) => {
+    let policy = input;
+    if (/^https?:\/\//.test(input)) {
+      const header = await fetchSiteCsp(input);
+      if (!header) {
+        process.stdout.write(
+          `NOT OK: ${input} sends no Content-Security-Policy header. WEBCAT only reads the header and cannot support a policy set in a <meta> tag.\n` +
+            `Start from a preset (webcat init picks one), or check a policy directly: webcat csp hint "${CSP_PRESETS.static.csp}"\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      policy = header;
+    }
+    process.stdout.write(`Policy: ${policy}\n\n`);
+    const report = hintCsp(policy);
+    process.stdout.write(formatCspReport(report));
+    if (!report.compatible) {
+      process.exitCode = 1;
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // enrollment
 
 const enrollment = program.command("enrollment").description("Create, canonicalize and hash enrollments");
 
-const SIGSUM = "Sigsum enrollment options:";
-const SIGSTORE = "Sigstore enrollment options:";
 const enrollmentCreate = enrollment
   .command("create")
   .description("Create an enrollment definition")
   .addOption(typeOption("Enrollment"))
   .option("-m, --max-age <seconds>", "Maximum age in seconds")
   .option("-o, --output <path>", "Write result to file instead of stdout")
-  .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").helpGroup(SIGSUM))
-  .addOption(new Option("-s, --signer <key>", "Signer public key, hex or base64 (repeatable)").argParser(collect).helpGroup(SIGSUM))
+  .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
+  .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
   .addOption(new Option("-c, --cas-url <url>", "CAS https URL").helpGroup(SIGSUM))
   .addOption(new Option("--trusted-root <path>", "Sigstore trusted root file").helpGroup(SIGSTORE))
@@ -111,24 +214,25 @@ for (const [flag, oid] of SIGSTORE_CLAIM_FLAGS) {
   enrollmentCreate.addOption(new Option(`--${flag} <value>`, `Sigstore claim OID ${oid}`).hideHelp());
 }
 enrollmentCreate.action(async (options) => {
-  let enrollmentObject: EnrollmentInput;
+  let enrollmentObject: Enrollment;
   if (options.type === "sigsum") {
-    const policyText = await readText(requireOption(options.policyFile, "--policy-file", "sigsum enrollments"), "policy");
-    enrollmentObject = buildEnrollmentObject({
+    requireOptions(
+      "sigsum enrollments",
+      [options.signer, "--signer"],
+      [options.threshold, "--threshold"],
+      [options.maxAge, "--max-age"],
+      [options.casUrl, "--cas-url"],
+    );
+    const policyText = await readText(options.policyFile, "policy");
+    enrollmentObject = await buildEnrollmentObject({
       type: "sigsum",
       ...(await sigsumEnrollmentFromPolicy(policyText)),
-      signers: options.signer ?? [],
-      threshold: requireOption(options.threshold, "--threshold", "sigsum enrollments"),
-      maxAge: requireOption(options.maxAge, "--max-age", "sigsum enrollments"),
-      casUrl: requireOption(options.casUrl, "--cas-url", "sigsum enrollments"),
+      signers: options.signer,
+      threshold: options.threshold,
+      maxAge: options.maxAge,
+      casUrl: options.casUrl,
     });
   } else {
-    if (options.communityTrustedRoot && options.trustedRoot) {
-      throw invalid("--trusted-root and --community-trusted-root are mutually exclusive");
-    }
-    if (!options.communityTrustedRoot && !options.trustedRoot) {
-      throw invalid("--trusted-root or --community-trusted-root is required for sigstore enrollments");
-    }
     // Explicit --claim first, then legacy aliases, then named flags; later entries win per OID.
     const claims: Record<string, string> = { ...(options.claim ?? {}) };
     if (options.identity) claims[SAN_OID] = options.identity.trim();
@@ -137,18 +241,26 @@ enrollmentCreate.action(async (options) => {
       const value = options[camel(flag)];
       if (value) claims[oid] = String(value).trim();
     }
-    if (Object.keys(claims).length === 0) {
-      throw invalid("--identity, --issuer or --claim is required for sigstore enrollments");
-    }
+    validateAll([
+      () => {
+        if (options.communityTrustedRoot && options.trustedRoot) {
+          throw invalid("--trusted-root and --community-trusted-root are mutually exclusive");
+        }
+        if (!options.communityTrustedRoot && !options.trustedRoot) {
+          throw invalid("--trusted-root or --community-trusted-root is required for sigstore enrollments");
+        }
+      },
+      () => {
+        if (Object.keys(claims).length === 0) {
+          throw invalid("--identity, --issuer or --claim is required for sigstore enrollments");
+        }
+      },
+      () => requireOption(options.maxAge, "--max-age", "sigstore enrollments"),
+    ]);
     const trustedRoot = options.communityTrustedRoot
       ? await fetchCommunityTrustedRoot()
       : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`);
-    enrollmentObject = buildEnrollmentObject({
-      type: "sigstore",
-      trustedRoot,
-      claims,
-      maxAge: requireOption(options.maxAge, "--max-age", "sigstore enrollments"),
-    });
+    enrollmentObject = await buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
   const json = JSON.stringify(enrollmentObject, null, 2);
@@ -165,7 +277,7 @@ enrollment
   .option("-o, --output <path>", "Write canonical JSON to a file")
   .action(async (options) => {
     const input = requireOption(options.input ?? options.enrollment, "--input", "enrollment canonicalize");
-    await writeOutput(options.output, canonicalize(await loadEnrollment(input)));
+    await writeOutput(options.output, canonicalizeEnrollment(await loadEnrollment(input)));
   });
 
 enrollment
@@ -173,7 +285,7 @@ enrollment
   .description("Canonicalize and hash an enrollment file")
   .requiredOption("-i, --input <path>", "Enrollment file to hash")
   .action(async (options) => {
-    const canonical = canonicalize(await loadEnrollment(options.input));
+    const canonical = canonicalizeEnrollment(await loadEnrollment(options.input));
     process.stdout.write(toBase64Url(sha256(canonical)) + "\n");
   });
 
@@ -222,17 +334,22 @@ enrollment
   .description("Show a domain's enrollment as served, as recorded on the chain, and as published in the list")
   .argument("<domain>", "Domain to inspect")
   .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
-  .option("--list <url>", "Published enrollment list to check", DEFAULT_LIST_URL)
+  .option("--list <url>", "Endpoint serving the published list.json and block.json; verified like the extension does", DEFAULT_LIST_ENDPOINT)
   .option("--no-list", "Skip the published list check")
   .action(async (domain: string, options) => {
     const [served, status, list] = await Promise.all([
       fetchServedEnrollment(domain).catch((err) => err as Error),
       fetchDomainStatus(options.chainApi, domain),
-      options.list ? fetchListEntry(options.list, domain).catch((err) => err as Error) : null,
+      options.list ? fetchVerifiedList(String(options.list).replace(/list\.json$/, "")).catch((err) => err as Error) : null,
     ]);
     const show = (value: string | null | undefined) => value ?? "none";
     process.stdout.write(`Domain: ${bareDomain(domain)}\n`);
     process.stdout.write(`Served enrollment: ${served instanceof Error ? `ERROR (${served.message})` : show(served?.hash)}\n`);
+    if (!(served instanceof Error) && served?.enrollment.type === EnrollmentTypes.Sigstore) {
+      const drift = trustedRootDrift(served.enrollment.trusted_root, await fetchCommunityTrustedRoot());
+      process.stdout.write(`Trusted root:      ${drift.length ? "WARNING, re-enroll before signing again" : "up to date with the community root"}\n`);
+      drift.forEach((line) => process.stdout.write(`                   - ${line}\n`));
+    }
     process.stdout.write(`Chain canonical:   ${show(status.canonical)}\n`);
     for (const p of status.pending) {
       process.stdout.write(`Chain pending:     ${show(p.hash)} (since ${p.time})\n`);
@@ -242,7 +359,9 @@ enrollment
     }
     if (list) {
       process.stdout.write(
-        list instanceof Error ? `Published list:    ERROR (${list.message})\n` : `Published list:    ${show(list.hash)} (block ${list.blockHeight})\n`,
+        list instanceof Error
+          ? `Published list:    ERROR (${list.message})\n`
+          : `Published list:    ${show(list.leaves.get(bareDomain(domain)))} (block ${list.blockHeight} at ${list.blockTime.toISOString()}, commit verified)\n`,
       );
     }
     const servedHash = served instanceof Error ? undefined : (served?.hash ?? null);
@@ -268,20 +387,22 @@ manifest
   .command("generate")
   .description("Generate a manifest from a directory and config")
   .addOption(typeOption("Manifest"))
-  .requiredOption("-c, --config <path>", "Manifest config JSON file")
+  .option("-c, --config <path>", "Manifest config JSON file", "webcat.config.json")
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
-  .option("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("-p, --policy-file <path>", "Sigsum policy file for timestamps", "trust_policy")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
-    const policyFile = options.type === "sigsum" ? requireOption(options.policyFile, "--policy-file", "sigsum manifests") : undefined;
+    const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
     const [config, scan, timestamp] = await Promise.all([
       loadManifestConfig(options.config),
       scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: options.exclude }),
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
+    const unserved = Object.keys(document.manifest.files).filter(isHostOnlyFile);
+    if (unserved.length) log(`Warning: hosts usually do not serve ${unserved.join(", ")}; exclude with ${unserved.map((p) => `--exclude ${p.slice(1)}`).join(" ")}`);
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
 
@@ -289,10 +410,11 @@ manifest
   .command("sign")
   .description("Sign a manifest with sigsum (default) or sigstore")
   .addOption(typeOption("Signature"))
-  .requiredOption("-i, --input <path>", "Manifest file to sign")
-  .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
-  .option("-k, --key <path>", "Sigsum private key for signing")
-  .option("--token-signing-key <path>", "Sigsum private key for token signing")
+  .option("-i, --input <path>", "Manifest file to sign", "manifest.json")
+  .option("-e, --enrollment <path>", "Enrollment to sign for: refuses keys or policies it would not accept and verifies the result", ".well-known/webcat/enrollment.json")
+  .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit", "trust_policy")
+  .option("-k, --key <path>", "Sigsum signing key: a private key file, or a .pub whose private key is in ssh-agent (hardware tokens)")
+  .option("--token-signing-key <path>", "Rate-limit token key: a private key file, or a .pub held in ssh-agent")
   .option("--token-domain <domain>", "Domain name to use for Sigsum rate limiting")
   .addOption(new Option("--bundle-type <type>", "Sigstore bundle type to generate").choices(["message", "dsse"]).default("message"))
   .option("--fulcio-url <url>", "Sigstore Fulcio base URL", DEFAULT_FULCIO_URL)
@@ -306,26 +428,44 @@ manifest
   .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
   .option("--no-open-browser", "Do not open a browser window for device authorization")
   .option("-o, --output <path>", "Write updated manifest to a file")
-  .action(async (options) => {
+  .action(async (options, command: Command) => {
     const document = await loadManifestDocument(options.input);
+    // The default enrollment path may simply not exist; an explicit one must.
+    const enrollment = await loadEnrollment(options.enrollment).catch((err) => {
+      if (command.getOptionValueSource("enrollment") === "default" && err instanceof CliError && /not found/.test(err.message)) {
+        log(`Warning: ${options.enrollment} not found, the signed manifest is not checked against an enrollment`);
+        return undefined;
+      }
+      throw err;
+    });
+    if (enrollment && enrollment.type !== options.type) {
+      throw invalid(`--type ${options.type} but ${options.enrollment} is a ${enrollment.type} enrollment`);
+    }
 
     if (options.type === "sigsum") {
-      const proofText = await signManifestWithSigsum(document, {
-        policyFile: requireOption(options.policyFile, "--policy-file", "sigsum signing"),
-        key: requireOption(options.key, "--key", "sigsum signing"),
+      requireOption(options.key, "--key", "sigsum signing");
+      await signManifestWithSigsum(document, {
+        policyFile: options.policyFile,
+        key: options.key,
+        enrollment: enrollment?.type === EnrollmentTypes.Sigsum ? enrollment : undefined,
         tokenSigningKey: options.tokenSigningKey,
         tokenDomain: options.tokenDomain,
       });
-      const { leaf, checksum, manifest: canonical } = await publishSigsumProofToCas(canonicalizeManifestBody(document), proofText);
-      log(`Saved raw Sigsum leaf to ${leaf.filePath} (sha256=${leaf.hash}).`);
-      log(`Saved Sigsum checksum payload to ${checksum.filePath} (sha256=${checksum.hash}).`);
-      log(`Saved canonical manifest to ${canonical.filePath} (sha256=${canonical.hash}).`);
     } else {
       if (options.bundleType === "dsse") {
         log("Warning: WEBCAT verifiers only accept message-signature bundles; a dsse bundle will not verify.");
       }
       if (options.oidcToken && options.interactive) {
         throw invalid("--oidc-token and --interactive are mutually exclusive");
+      }
+      if (enrollment?.type === EnrollmentTypes.Sigstore) {
+        // Fail before requesting a certificate when the pinned root can no longer verify new signatures.
+        const community = await fetchCommunityTrustedRoot();
+        const blocked = signingBlockedBy(enrollment.trusted_root, community, { withTsa: Boolean(options.tsaUrl) });
+        if (blocked.length) {
+          throw invalid(`signing cannot produce a manifest that verifies under ${options.enrollment}; re-enroll with a fresh trusted root first:\n  - ${blocked.join("\n  - ")}`);
+        }
+        trustedRootDrift(enrollment.trusted_root, community).forEach((line) => log(`Warning: ${line}; plan a re-enrollment`));
       }
       const identityProvider = options.oidcToken
         ? staticIdentityProvider(options.oidcToken)
@@ -346,6 +486,23 @@ manifest
         tsaUrl: options.tsaUrl,
         identityProvider,
       });
+    }
+    if (enrollment) {
+      // Verify before publishing anything; a partial threshold still gets the timestamp and expiry checks (threshold 1).
+      let result = await verifyBundle({ enrollment, manifest: document });
+      const partial = result instanceof WebcatError && result.code === WebcatErrorCode.Manifest.THRESHOLD_UNSATISFIED ? result : null;
+      if (partial && enrollment.type === EnrollmentTypes.Sigsum) {
+        result = await verifyBundle({ enrollment: { ...enrollment, threshold: 1 }, manifest: document });
+      }
+      if (result instanceof WebcatError) {
+        throw invalid(`the signed manifest does not verify against ${options.enrollment}: ${describeWebcatError(result)}; nothing written`);
+      }
+      log(partial ? `Signed: ${partial.details?.[0]} of ${partial.details?.[1]} required signatures present, sign again with another enrolled key` : `Verified against ${options.enrollment}: ${describeValidity(result)}`);
+    }
+    if (options.type === "sigsum") {
+      const { checksum, manifest: canonical } = await publishManifestToCas(canonicalizeManifestBody(document));
+      log(`Saved Sigsum checksum payload to ${checksum.filePath} (sha256=${checksum.hash}).`);
+      log(`Saved canonical manifest to ${canonical.filePath} (sha256=${canonical.hash}).`);
     }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
@@ -387,31 +544,54 @@ manifest
     if (!bundlePath === !enrollmentPath || !enrollmentPath !== !manifestPath) {
       throw invalid("a bundle argument, or --enrollment together with --manifest, is required for manifest verify");
     }
-    const { enrollment, manifest: document } = enrollmentPath
+    const bundle = enrollmentPath
       ? { enrollment: await loadEnrollment(enrollmentPath), manifest: await loadManifestDocument(manifestPath) }
       : await loadBundleDocument(bundlePath!);
-
-    let passed: boolean;
-    if (enrollment.type === "sigsum") {
-      const results = await verifySigsumManifest(enrollment, document);
-      for (const { signer, ok, message } of results) {
-        process.stdout.write(`Signer ${signer}: ${ok ? "OK" : "FAIL"}${message ? ` (${message})` : ""}\n`);
-      }
-      const verified = results.filter((r) => r.ok).length;
-      passed = verified >= enrollment.threshold;
-      process.stdout.write(`${passed ? "VERIFIED" : "FAILED"}: ${verified}/${enrollment.threshold} required signatures verified\n`);
-      process.stdout.write(`Enrollment policy hash: ${hashPolicyBytes(enrollment.policy)}\n`);
-    } else {
-      const results = await verifySigstoreManifest(enrollment, document);
-      for (const { index, ok, message } of results) {
-        process.stdout.write(`Bundle ${index}: ${ok ? "OK" : "FAIL"}${message ? ` (${message})` : ""}\n`);
-      }
-      passed = results.some((r) => r.ok);
-      process.stdout.write(
-        `${passed ? "VERIFIED" : "FAILED"}: ${results.filter((r) => r.ok).length}/${results.length} sigstore bundle(s) satisfy the enrollment claims\n`,
-      );
+    const result = await verifyBundle(bundle);
+    if (bundle.enrollment.type === EnrollmentTypes.Sigsum) {
+      process.stdout.write(`Enrollment policy hash: ${hashPolicyBytes(bundle.enrollment.policy)}\n`);
     }
-    if (!passed) {
+    if (result instanceof WebcatError) {
+      process.stdout.write(`FAILED: ${describeWebcatError(result)}\n`);
+      process.exitCode = 1;
+    } else {
+      process.stdout.write(`VERIFIED: ${describeValidity(result)}\n`);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// site
+
+program
+  .command("site")
+  .description("Check deployed sites")
+  .command("check")
+  .description("Fetch a live site like the extension does: verify its bundle, then check headers, CSP and file hashes for every path")
+  .argument("<domain>", "Domain to check")
+  .option("--path <path>", "Only check this path (repeatable); default: / plus every file in the manifest", collect)
+  .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
+  .action(async (domain: string, options) => {
+    // Progress only on a terminal, so piped output stays clean.
+    const onProgress = process.stderr.isTTY ? (done: number, total: number) => process.stderr.write(`\rChecking paths: ${done}/${total}${done === total ? "\n" : ""}`) : undefined;
+    const report = await checkSite(domain, { chainApi: options.chainApi, paths: options.path, onProgress });
+    process.stdout.write(`Bundle:          ${report.bundle}\n`);
+    process.stdout.write(`Previous bundle: ${report.previousBundle}\n`);
+    process.stdout.write(`Enrollment:      ${report.enrollment}\n`);
+    if (report.trustedRoot.length) {
+      process.stdout.write("Trusted root:    WARNING, re-enroll before signing again\n");
+      report.trustedRoot.forEach((line) => process.stdout.write(`  - ${line}\n`));
+    }
+    const failed = report.paths.filter((p) => p.problems.length > 0);
+    process.stdout.write(`Paths:           ${report.paths.length} checked, ${failed.length} with problems\n`);
+    for (const { path, problems } of failed) {
+      process.stdout.write(`  ${path}\n`);
+      for (const problem of problems) {
+        process.stdout.write(`    - ${problem}\n`);
+      }
+    }
+    const broken = failed.length > 0 || !report.bundle.startsWith("VERIFIED") || /MISMATCH|ERROR/.test(report.enrollment);
+    process.stdout.write(broken ? "Status: NOT OK, visitors with the extension will see errors\n" : "Status: OK\n");
+    if (broken) {
       process.exitCode = 1;
     }
   });
@@ -424,8 +604,8 @@ program
   .description("Combine an enrollment and a signed manifest into a bundle")
   .command("create")
   .description("Create a bundle from enrollment and a signed manifest")
-  .requiredOption("-e, --enrollment <path>", "Enrollment JSON file")
-  .requiredOption("-m, --manifest <path>", "Signed manifest JSON file")
+  .option("-e, --enrollment <path>", "Enrollment JSON file", ".well-known/webcat/enrollment.json")
+  .option("-m, --manifest <path>", "Signed manifest JSON file", "manifest.signed.json")
   .option("-o, --output <path>", "Write bundle JSON to a file")
   .action(async (options) => {
     const [enrollment, document] = await Promise.all([loadEnrollment(options.enrollment), loadManifestDocument(options.manifest)]);

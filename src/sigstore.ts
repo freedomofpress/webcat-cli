@@ -1,17 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import {
-  AllOf,
-  EXTENSION_OID_OTHERNAME,
-  PolicyError,
-  SigstoreVerifier,
-  TrustedRootProvider,
-  type SigstoreBundle,
-  type TrustedRoot,
-  type VerificationPolicy,
-  type X509Certificate,
-} from "@freedomofpress/sigstore-browser";
+import { TrustedRootProvider } from "@freedomofpress/sigstore-browser";
 import { bundleToJSON } from "@sigstore/bundle";
 import {
   CIContextProvider,
@@ -25,9 +15,8 @@ import {
   type IdentityProvider,
   type Witness,
 } from "@sigstore/sign";
-import type { SigstoreEnrollmentInput } from "./enrollment.js";
 import { ManifestDocument, canonicalizeManifestBody } from "./manifest.js";
-import { causeOf, ensureObject, external, invalid, log, sha256 } from "./utils.js";
+import { causeOf, ensureObject, external, fetchJson, invalid, log, sha256 } from "./utils.js";
 
 export { DEFAULT_FULCIO_URL, DEFAULT_REKOR_URL };
 export const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
@@ -63,6 +52,53 @@ export const SIGSTORE_CLAIM_FLAGS: ReadonlyArray<readonly [flag: string, oid: st
   ["source-repository-visibility-at-signing", "1.3.6.1.4.1.57264.1.22"],
   ["deployment-environment", "1.3.6.1.4.1.57264.1.23"],
 ];
+
+// Trusted-root entries by kind: logs are identified by public key, CAs and TSAs by their leaf certificate.
+const ROOT_KINDS: Array<[field: string, kind: string, id: (e: any) => string, label: (e: any) => string, validFor: (e: any) => any]> = [
+  ["certificateAuthorities", "certificate authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
+  ["tlogs", "transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
+  ["ctlogs", "certificate transparency log", (e) => e.publicKey?.rawBytes ?? "", (e) => e.baseUrl, (e) => e.publicKey?.validFor],
+  ["timestampAuthorities", "timestamp authority", (e) => e.certChain?.certificates?.[0]?.rawBytes ?? "", (e) => e.uri, (e) => e.validFor],
+];
+const activeAt = (validFor: any, now: Date): boolean => (!validFor?.start || new Date(validFor.start) <= now) && (!validFor?.end || new Date(validFor.end) > now);
+
+// What the community root has that a pinned enrollment root lacks: each line is a reason a re-enrollment is coming.
+export function trustedRootDrift(pinned: any, community: any, now = new Date()): string[] {
+  const drift: string[] = [];
+  for (const [field, kind, id, label, validFor] of ROOT_KINDS) {
+    const mine = new Map<string, any>((pinned?.[field] ?? []).map((e: any) => [id(e), e]));
+    for (const entry of community?.[field] ?? []) {
+      const pinnedEntry = mine.get(id(entry));
+      if (!pinnedEntry) {
+        if (validFor(entry)?.end && new Date(validFor(entry).end) < now) continue; // already retired, nothing to adopt
+        drift.push(`new ${kind} ${label(entry)} (valid from ${validFor(entry)?.start ?? "?"}) is not in the enrollment's trusted root`);
+      } else if (validFor(entry)?.end && !validFor(pinnedEntry)?.end) {
+        drift.push(`${kind} ${label(entry)} ends on ${validFor(entry).end} in the community root`);
+      }
+    }
+  }
+  return drift;
+}
+
+// Drift that stops signing: for a service kind the signer relies on, none of the community root's currently
+// valid entries is in the pinned root, so nothing issued today can verify under the enrollment.
+// TSAs only matter when the signer asks for a timestamp.
+export function signingBlockedBy(pinned: any, community: any, options: { withTsa?: boolean; now?: Date } = {}): string[] {
+  const now = options.now ?? new Date();
+  const blocked: string[] = [];
+  for (const [field, kind, id, , validFor] of ROOT_KINDS) {
+    if (field === "timestampAuthorities" && !options.withTsa) continue;
+    const current = (community?.[field] ?? []).filter((e: any) => activeAt(validFor(e), now));
+    const pinnedIds = new Set((pinned?.[field] ?? []).map(id));
+    if (current.length === 0 || pinnedIds.size === 0) {
+      continue; // the enrollment never relied on this kind, or the public instance has none right now
+    }
+    if (!current.some((e: any) => pinnedIds.has(id(e)))) {
+      blocked.push(`no currently valid ${kind} in the community root is in the enrollment's trusted root`);
+    }
+  }
+  return blocked;
+}
 
 export async function fetchCommunityTrustedRoot(): Promise<Record<string, unknown>> {
   const provider = new TrustedRootProvider({ disableCache: true });
@@ -103,13 +139,7 @@ function openInBrowser(url: string): void {
 
 export async function fetchInteractiveOidcToken(options: OidcDeviceFlowOptions): Promise<string> {
   const configUrl = `${options.issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
-  const configResponse = await fetch(configUrl).catch((err) => {
-    throw external(`failed to fetch OIDC configuration from ${configUrl}: ${causeOf(err)}`);
-  });
-  if (!configResponse.ok) {
-    throw external(`failed to fetch OIDC configuration from ${configUrl}: HTTP ${configResponse.status} ${configResponse.statusText}`);
-  }
-  const config = await configResponse.json();
+  const config = await fetchJson(configUrl);
   if (!config.device_authorization_endpoint || !config.token_endpoint) {
     throw external(`failed to use OIDC configuration from ${configUrl}: no device authorization or token endpoint`);
   }
@@ -189,94 +219,3 @@ export async function signManifestWithSigstore(document: ManifestDocument, optio
 
 export const staticIdentityProvider = (token: string): IdentityProvider => ({ getToken: async () => token });
 export const ciIdentityProvider = (audience: string): IdentityProvider => new CIContextProvider(audience);
-
-// ---------------------------------------------------------------------------
-// Verification (mirrors the WEBCAT extension's validators so CLI results match what browsers enforce)
-
-class ClaimPolicy implements VerificationPolicy {
-  constructor(
-    private readonly oid: string,
-    private readonly expected: string,
-  ) {}
-
-  // A leading "^" turns the expected value into a prefix match.
-  private matches(got: string): boolean {
-    return this.expected.startsWith("^") ? got.startsWith(this.expected.slice(1)) : got === this.expected;
-  }
-
-  verify(cert: X509Certificate): void {
-    if (this.oid === SAN_OID) {
-      const san = cert.extSubjectAltName;
-      if (!san) {
-        throw new PolicyError("certificate has no SubjectAlternativeName");
-      }
-      const names = [san.rfc822Name, san.uri, san.otherName(EXTENSION_OID_OTHERNAME)].filter((n): n is string => !!n);
-      if (!names.some((n) => this.matches(n))) {
-        throw new PolicyError(`SAN mismatch for ${SAN_OID}: expected '${this.expected}', got '${names.join(", ")}'`);
-      }
-      return;
-    }
-    const ext = cert.extension(this.oid);
-    if (!ext) {
-      throw new PolicyError(`certificate has no extension ${this.oid}`);
-    }
-    let got: string;
-    try {
-      // Fulcio v2 extensions wrap a DER UTF8String; v1 extensions are a raw OCTET STRING.
-      const inner = ext.valueObj.subs[0]?.value;
-      got = new TextDecoder().decode(inner?.length ? inner : ext.value);
-    } catch {
-      throw new PolicyError(`failed to decode extension ${this.oid}`);
-    }
-    if (!this.matches(got)) {
-      throw new PolicyError(`extension ${this.oid} mismatch: expected '${this.expected}', got '${got}'`);
-    }
-  }
-}
-
-class CertFreshnessPolicy implements VerificationPolicy {
-  constructor(private readonly maxAgeSeconds: number) {}
-
-  verify(cert: X509Certificate): void {
-    const issued = Math.floor(cert.notBefore.getTime() / 1000);
-    if (Math.floor(Date.now() / 1000) > issued + this.maxAgeSeconds) {
-      throw new PolicyError(`certificate is too old: issued at ${issued}, enrollment.max_age is ${this.maxAgeSeconds}s`);
-    }
-  }
-}
-
-export interface BundleVerification {
-  index: number;
-  ok: boolean;
-  message?: string;
-}
-
-export async function verifySigstoreManifest(
-  enrollment: SigstoreEnrollmentInput,
-  document: ManifestDocument,
-): Promise<BundleVerification[]> {
-  if (document.signatures && !Array.isArray(document.signatures)) {
-    throw invalid("manifest.signatures contains sigsum proofs but enrollment.type is sigstore");
-  }
-  const bundles = document.signatures ?? [];
-  if (bundles.length === 0) {
-    return [];
-  }
-  const verifier = new SigstoreVerifier();
-  await verifier.loadSigstoreRoot(enrollment.trusted_root as unknown as TrustedRoot);
-  const policy = new AllOf([
-    ...Object.entries(enrollment.claims).map(([oid, expected]) => new ClaimPolicy(oid, expected)),
-    new CertFreshnessPolicy(enrollment.max_age),
-  ]);
-  const data = new TextEncoder().encode(canonicalizeManifestBody(document));
-  const results: BundleVerification[] = [];
-  for (const [index, bundle] of bundles.entries()) {
-    try {
-      const ok = await verifier.verifyArtifactPolicy(policy, bundle as unknown as SigstoreBundle, data);
-      results.push(ok ? { index, ok } : { index, ok, message: "verification failed" });
-    } catch (err) {
-      results.push({ index, ok: false, message: causeOf(err) });
-    }
-  }
-  return results;
-}

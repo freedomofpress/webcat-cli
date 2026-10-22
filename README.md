@@ -21,6 +21,16 @@ See the following examples and porting guides (outdated):
 
 At the end, you should have compiled a `webcat.config.json` base file for your use case.
 
+Quick yes-or-no check of a candidate policy, with the extension's own validator, and a
+hinter that explains each incompatibility with the documented workaround and proposes the
+nearest policy that passes. It accepts a policy string or a page URL to read the policy from:
+
+```sh
+npx webcat csp check "default-src 'none'; script-src 'self'; style-src 'self'"
+npx webcat csp hint "default-src 'self'; script-src 'self' https://cdn.example 'unsafe-inline'"
+npx webcat csp hint https://example.org/
+```
+
 ## Decide and prepare enrollment information
 
 A WEBCAT manifest describes a web application by listing its files, cryptographic hashes, CSP policies, and additional metadata useful for auditability. But how is this information verified?
@@ -58,30 +68,50 @@ To learn more about Sigsum and how to write a policy, see Sigsum's [_Getting Sta
 
 ### Choosing Sigstore
 
-If you choose Sigstore, WEBCAT provides GitHub Actions that support automated deployments.
+If you choose Sigstore, signing happens in CI with the workflow's own identity, so no key
+material is stored anywhere. This guide assumes the Sigstore [_Public Good_ instance](https://openssf.org/blog/2023/10/03/running-sigstore-as-a-managed-service-a-tour-of-sigstores-public-good-instance/),
+the same one used by GitHub and public container registries.
 
 > [!WARNING]
 > Sigstore support is still a work in progress. Claim-based enrollment constraints are supported.
 
-In theory, WEBCAT also supports a bring-your-own Sigstore deployment. This is not documented here due to its complexity. This guide assumes you are using the Sigstore [_Public Good_ instance](https://openssf.org/blog/2023/10/03/running-sigstore-as-a-managed-service-a-tour-of-sigstores-public-good-instance/), the same one used by GitHub and public container registries.
+Enroll once, naming the workflow that will sign (the identity is the workflow file at the
+branch that runs it):
 
-The Sigstore workflow consists of two actions:
+```sh
+npx webcat init --type sigstore \
+  --origin https://example.org \
+  --identity https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --issuer https://token.actions.githubusercontent.com
+```
 
-* Enrollment Update Action - [Source](https://github.com/freedomofpress/webcat-cli/blob/main/.github/workflows/sigstore-enrollment-sync.yml) / [Example usage](https://github.com/freedomofpress/webcat-demo-test/blob/main/.github/workflows/sync-sigstore-enrollment.yml)
+Then have that workflow call the CLI directly. The `id-token` permission is what lets the job
+obtain a Sigstore certificate for its identity:
 
-  * Fetches the latest trust material using TUF
-  * Updates enrollment information if changes are detected
-  * Submits the updated enrollment for re-evaluation by the distributed system
-    *(This submission step will soon be integrated directly into the CLI.)*
+```yaml
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build                      # produces dist/
+      - run: npx @freedomofpress/webcat-cli manifest generate --type sigstore -d dist -o manifest.json
+      - run: npx @freedomofpress/webcat-cli manifest sign --type sigstore -o manifest.signed.json
+      - run: npx @freedomofpress/webcat-cli bundle create -o dist/.well-known/webcat/bundle.json
+      - run: cp .well-known/webcat/enrollment.json dist/.well-known/webcat/
+      # deploy dist/ as usual; keep the previous bundle.json as bundle-prev.json across enrollment changes
+```
 
-> [!CAUTION]
-> Sigstore enrollments support claim-based constraints using certificate extension OIDs.
-
-* Manifest Update Action - [Example Usage](https://github.com/freedomofpress/webcat-demo-test/blob/main/.github/workflows/generate-sign-sigstore-manifest.yaml)
-
-  * Generates, signs, and bundles a WEBCAT manifest
-
-See the `webcat-demo-test` repository for a complete, end-to-end example of this flow. Note: due to how the Sigstore is claimed in Github Action, this has to be copied in the target repository and should not be invoked directly from the webcat0-cli one.
+`manifest sign` checks the enrollment before requesting a certificate and fails the job with
+exit 2 if the enrollment's pinned trusted root can no longer verify new signatures. When that
+happens, re-run `init` (or `enrollment create --community-trusted-root`) to refresh the root,
+then `enrollment submit` so the chain records the new enrollment.
 
 ## Using the CLI
 
@@ -93,7 +123,7 @@ Take a look at [`demo.sh`](./demo.sh) or the [end-to-end example] below.
 
 ### If you are using Sigstore
 
-Refer to the GitHub Actions described above.
+See the CI job above; every step is a plain CLI invocation.
 
 ## Requirements
 
@@ -126,6 +156,43 @@ go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
 ```
 
 By default, these binaries will be available in `$HOME/go/bin`.
+
+## Getting started
+
+`init` offers two built-in Sigsum policies: `test` (the Sigsum test logs, no rate limiting)
+and `production` (`sigsum-generic-2025-1`, logs and witnesses vetted by the Sigsum project).
+Production logs rate-limit submissions per domain: `init` generates `keys/token` and prints
+the `_sigsum_v1.<domain>` TXT record to publish, and the `manifest sign` flags that use it
+(`--token-signing-key keys/token --token-domain <domain>`).
+
+### Hardware keys and ssh-agent
+
+`sigsum-submit` signs through the SSH agent when it is given a public key instead of a private
+one, which is how YubiKeys and other tokens holding an ed25519 key are used. Pass the `.pub`
+everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
+`manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
+ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
+
+### Content-addressable storage (`cas_url`)
+
+A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes two objects under `./cas/`,
+named by their SHA-256: the submitted message (the manifest's SHA-256) and the canonical manifest.
+A log entry's checksum is the SHA-256 of the message, so an auditor fetches `cas_url/<checksum>`
+to get the message and `cas_url/<sha256 of message>` to get the manifest; the site must serve the
+`cas/` directory at `cas_url` as static files (any https URL you control works, for example
+`https://example.org/cas/`). With `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
+`WEBCAT_CAS_S3_TOKEN` set, `manifest sign` also uploads them to an S3-compatible bucket.
+
+`init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
+or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
+`.well-known/webcat/enrollment.json`, and prints the next steps. Every answer is also a flag,
+so it runs unattended in CI:
+
+```sh
+npx webcat init
+npx webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
+npx webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
+```
 
 ## Enrollment helpers
 
@@ -207,7 +274,7 @@ Example – hash the provided manifest:
 
 ```sh
 npx webcat manifest hash -i examples/manifest.json
-# => FzuGGV73J4ayAyrZBLw8NPT364Djuu8h9Mdr1xiMM-o
+# => KC20rk9wEouC18wkosAM2I7-ANnIxdBNTw6NibRGh88
 ```
 
 Example – verify a bundle, or an enrollment plus a signed manifest:
@@ -217,9 +284,19 @@ npx webcat manifest verify examples/bundle.json
 npx webcat manifest verify --enrollment enrollment.json --manifest manifest.json
 ```
 
-Sigstore verification applies the same rules as the browser extension: every enrollment
-claim must match the signing certificate (a value starting with `^` is a prefix match),
-and the certificate must have been issued less than `max_age` seconds ago.
+Verification, and all enrollment, manifest and CSP validation, is done by
+[`@freedomofpress/webcat`](https://www.npmjs.com/package/@freedomofpress/webcat), the
+browser extension's own code, so the CLI accepts exactly what browsers accept. Failures
+are reported with the extension's error codes (`ERR_WEBCAT_...`), for example an expired
+manifest is `ERR_WEBCAT_MANIFEST_EXPIRED`. A successful verification prints the time until
+which the manifest stays valid. The `examples/` bundle was signed against the Sigsum test
+logs with throwaway keys and expires after a year; regenerate it with `demo.sh` when it does.
+
+`manifest sign` reads the enrollment (default `.well-known/webcat/enrollment.json`) and signs
+for it: a key that is not an enrolled signer or a policy that does not compile to the
+enrollment's is refused before anything is submitted to a log, and the result is verified
+with the extension's own verifier before it is written, reporting how many of the required
+signatures are present.
 
 ### Sigstore signing
 
@@ -265,6 +342,32 @@ npx webcat manifest sign \
   --oidc-client-id example-client \
   --interactive
 ```
+
+`enrollment status` reads the published list the way the extension does: it fetches
+`block.json` alongside `list.json`, verifies the block commit against the chain's validator
+set and chain id shipped with the extension, and checks the leaves prove into the block's app
+hash before reporting what the list says.
+
+For Sigstore enrollments, `enrollment status` and `site check` compare the enrollment's pinned
+trusted root with the current community root and warn when a certificate authority, log or
+timestamp authority has been added or given an end date: that is the signal to re-enroll
+before signing again.
+
+## Site checks
+
+`site check` fetches a deployed site the way the extension does and reports everything a
+visitor's browser would reject: it verifies `bundle.json` (and `bundle-prev.json` if served),
+compares the embedded enrollment with `enrollment.json` and the chain, then requests `/` and
+every file in the manifest and checks the response for exactly one `content-security-policy`
+header equal to the manifest's policy for that path, forbidden headers (`refresh`, `link`,
+`origin-agent-cluster` other than `?1`), redirects, and the content hash.
+
+```sh
+npx webcat site check example.org
+npx webcat site check example.org --path / --path /app/main.js
+```
+
+Exits 1 when the bundle does not verify, the enrollment does not match, or any path has a problem.
 
 ## Exit codes
 
