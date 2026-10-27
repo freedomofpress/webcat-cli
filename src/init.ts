@@ -1,33 +1,33 @@
 // `webcat init`: the few answers a site needs, written as the files the other commands expect,
 // then the next steps printed. Every answer can be given as a flag, so CI never prompts.
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
-import { buildEnrollmentObject } from "./enrollment.js";
+import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
 import { ISSUER_V2_OID, SAN_OID, fetchCommunityTrustedRoot } from "./sigstore.js";
-import { causeOf, invalid, log, readText, validateAll } from "./utils.js";
+import { causeOf, invalid, log, readText, validateAll, validateCasUrl } from "./utils.js";
 
 export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
   static: {
-    title: "Static site: no WebAssembly, no framing",
+    title: "a static site, no WebAssembly, no framing",
     csp: "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   },
   wasm: {
-    title: "Web app with WebAssembly and workers",
+    title: "a web app with WebAssembly and workers",
     csp: "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   },
 };
 
 // Policies built into the Sigsum tools. Production logs rate-limit by domain, so signing needs a DNS token key.
 export const SIGSUM_POLICIES: Record<string, { name: string; title: string; rateLimited: boolean }> = {
-  test: { name: "sigsum-test-2025-3", title: "Sigsum test logs, no rate limiting, for trying things out", rateLimited: false },
-  production: { name: "sigsum-generic-2025-1", title: "Sigsum production logs vetted by the Sigsum project (2-of-3 witnesses), rate-limited per domain", rateLimited: true },
+  test: { name: "sigsum-test-2025-3", title: "the Sigsum test logs, no rate limiting, for trying things out", rateLimited: false },
+  production: { name: "sigsum-generic-2025-1", title: "the Sigsum production logs vetted by the Sigsum project, 2-of-3 witnesses, rate-limited per domain", rateLimited: true },
 };
 
-// ponytail: offline copy of the test policy for when sigsum-policy is not installed; production always comes from the tool.
+// Offline copy of the test policy for when sigsum-policy is not installed; production always comes from the tool.
 export const SIGSUM_TEST_POLICY = `log 4644af2abd40f4895a003bca350f9d5912ab301a49c77f13e5b6d905c20a5fe6 https://test.sigsum.org/barreleye
 witness poc.sigsum.org/nisse 1c25f8a44c635457e2e391d1efbca7d4c2951a0aef06225a881e46b98962ac6c
 witness rgdd.se/poc-witness  28c92a5a3a054d317c86fc2eeb6a7ab2054d6217100d0be67ded5b74323c5806
@@ -53,63 +53,109 @@ export interface InitOptions {
   dir: string;
 }
 
-type Ask = (flag: string, label: string, fallback?: string) => Promise<string>;
+// Validators shared by the prompts (re-ask on failure) and the flags (fail at the end).
+const httpsOrigin = (value: string): void => {
+  try {
+    if (new URL(value).protocol !== "https:") throw new Error("must use https://");
+  } catch (err) {
+    throw invalid(`--origin must be an https URL: ${causeOf(err)}`);
+  }
+};
+const compatibleCsp = (value: string): void => {
+  try {
+    validateCSP(value);
+  } catch (err) {
+    throw invalid(`--csp must be a WEBCAT-compatible CSP: ${causeOf(err)}`);
+  }
+};
+const wholeNumber = (flag: string) => (value: string): void => {
+  if (!/^\d+$/.test(value)) throw invalid(`--${flag} must be a whole number`);
+};
+const httpsUrl = (flag: string) => (value: string): void => {
+  try {
+    if (new URL(value).protocol !== "https:") throw new Error("must use https://");
+  } catch (err) {
+    throw invalid(`--${flag} must be an https URL: ${causeOf(err)}`);
+  }
+};
+const readableFile = (flag: string) => (value: string): Promise<void> =>
+  access(value).catch(() => {
+    throw invalid(`--${flag}: cannot read ${value}`);
+  });
+const signerKeys = async (value: string): Promise<void> => {
+  for (const v of value.split(",").map((s) => s.trim()).filter(Boolean)) await signerFromValue(v);
+};
+const atMost = (flag: string, count: number) => (value: string): void => {
+  wholeNumber(flag)(value);
+  if (Number(value) < 1 || Number(value) > count) throw invalid(`--${flag} must be between 1 and ${count}, the number of signing keys`);
+};
+
+type Ask = (flag: string, question: string, fallback?: string, validate?: (value: string) => void | Promise<void>) => Promise<string>;
 
 async function answers(options: InitOptions): Promise<Required<Pick<InitOptions, "origin" | "version" | "type" | "csp" | "maxAge">> & InitOptions> {
   const rl = stdin.isTTY ? createInterface({ input: stdin, output: stdout }) : null;
+  // Each prompt is a question, then "flag [default]: ". A rejected answer is explained and asked again.
   // Without a terminal, defaults apply silently and anything without a default must be a flag.
-  const ask: Ask = async (flag, label, fallback) => {
+  const ask: Ask = async (flag, question, fallback, validate) => {
     if (!rl) {
       if (fallback === undefined) {
         throw invalid(`--${flag} is required when not running in a terminal`);
       }
       return fallback;
     }
-    const reply = (await rl.question(fallback ? `${label} [${fallback}]: ` : `${label}: `)).trim();
-    return reply || fallback || "";
+    stdout.write(`${question}\n`);
+    for (;;) {
+      const reply = (await rl.question(fallback ? `${flag} [${fallback}]: ` : `${flag}: `)).trim() || fallback || "";
+      try {
+        if (!reply) throw invalid(`${flag} is required`);
+        await validate?.(reply);
+        stdout.write("\n");
+        return reply;
+      } catch (err) {
+        stdout.write(`${causeOf(err)}\n`);
+      }
+    }
   };
-  const choose = async (flag: string, choices: Array<[key: string, title: string]>, fallback: string): Promise<string> => {
-    if (rl) {
-      choices.forEach(([key, title], i) => stdout.write(`  ${i + 1}) ${title} (${key})\n`));
-    }
-    const reply = await ask(flag, flag, fallback);
-    const picked = choices.find(([key], i) => key === reply || String(i + 1) === reply);
-    if (!picked) {
-      throw invalid(`--${flag} must be one of ${choices.map(([key]) => key).join(", ")}`);
-    }
-    return picked[0];
+  const choose = async (flag: string, question: string, choices: Array<[key: string, title: string]>, fallback: string): Promise<string> => {
+    const keys = choices.map(([key]) => key);
+    const pick = (reply: string) => choices.find(([key], i) => key === reply || String(i + 1) === reply)?.[0];
+    const reply = await ask(flag, [question, ...choices.map(([key, title], i) => `  ${i + 1}. ${key}: ${title}`)].join("\n"), fallback, (value) => {
+      if (!pick(value)) throw invalid(`--${flag} must be one of ${keys.join(", ")}`);
+    });
+    return pick(reply)!;
   };
   try {
-    const origin = options.origin ?? (await ask("origin", "origin (https://example.org)"));
-    const version = options.version ?? (await ask("app-version", "version of this release", "1.0.0"));
-    const type = (options.type ?? (await choose("type", [["sigsum", "Sigsum: you hold the signing keys"], ["sigstore", "Sigstore: sign from CI with an OIDC identity"]], "sigsum"))) as "sigsum" | "sigstore";
+    const origin = options.origin ?? (await ask("origin", "What is the public URL of your site? Give the origin, in the form https://example.org", undefined, httpsOrigin));
+    const version = options.version ?? (await ask("app-version", "Which version of your site are you publishing?", "1.0.0"));
+    const type = (options.type ??
+      (await choose("type", "Which signing mechanism do you want to use?", [["sigsum", "you hold the signing keys"], ["sigstore", "sign from CI with an OIDC identity"]], "sigsum"))) as "sigsum" | "sigstore";
     let csp = options.csp;
     if (!csp) {
       const presets = Object.entries(CSP_PRESETS).map(([key, p]) => [key, p.title] as [string, string]);
-      const preset = await choose("csp", [...presets, ["custom", "Type your own policy"]], "static");
-      csp = preset === "custom" ? await ask("csp", "csp") : CSP_PRESETS[preset].csp;
+      const preset = await choose("csp", "What is the Content Security Policy of your site? Choose a preset or type your own", [...presets, ["custom", "type your own policy"]], "static");
+      csp = preset === "custom" ? await ask("csp", "Type the policy. `webcat csp hint` explains what WEBCAT rejects in one", undefined, compatibleCsp) : CSP_PRESETS[preset].csp;
     }
-    const maxAge = options.maxAge ?? (await ask("max-age", "max-age (seconds a signed manifest stays valid)", String(DEFAULT_MAX_AGE)));
+    const maxAge = options.maxAge ?? (await ask("max-age", "How many seconds should a signed manifest stay valid? Visitors need a fresh one after that", String(DEFAULT_MAX_AGE), wholeNumber("max-age")));
     const rest: InitOptions = { ...options };
     if (type === "sigsum") {
-      rest.policy ??= await choose("policy", [...Object.entries(SIGSUM_POLICIES).map(([k, p]) => [k, p.title] as [string, string]), ["file", "Path to your own policy file"]], "test");
+      rest.policy ??= await choose("policy", "Which Sigsum policy should accept your signatures?", [...Object.entries(SIGSUM_POLICIES).map(([k, p]) => [k, p.title] as [string, string]), ["file", "the path to your own policy file"]], "test");
       if (rest.policy === "file") {
-        rest.policy = await ask("policy", "policy file path");
+        rest.policy = await ask("policy", "Where is your policy file?", undefined, readableFile("policy"));
       }
       if (!rest.signer && rest.keys === undefined) {
-        rest.keys = await ask("keys", "how many signing keys to generate now with sigsum-key (0 to use existing public keys)", "2");
+        rest.keys = await ask("keys", "How many signing keys should be generated now with sigsum-key? 0 to use public keys you already have", "2", wholeNumber("keys"));
       }
       if (!rest.signer && Number(rest.keys) === 0) {
-        rest.signer = (await ask("signer", "signer public keys: hex, base64 or OpenSSH .pub paths (hardware keys via ssh-agent), comma separated"))
+        rest.signer = (await ask("signer", "Which public keys will sign your manifests? Hex, base64 or OpenSSH .pub paths, comma separated. Hardware keys sign through ssh-agent", undefined, signerKeys))
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
       }
-      rest.threshold ??= await ask("threshold", "threshold (signatures required)", "1");
-      rest.casUrl ??= await ask("cas-url", "cas-url (where Sigsum proofs are published)", `${origin.replace(/\/+$/, "")}/cas/`);
+      rest.threshold ??= await ask("threshold", "How many of those signatures must a manifest carry?", "1", atMost("threshold", rest.signer?.length || Number(rest.keys)));
+      rest.casUrl ??= await ask("cas-url", "Where will Sigsum proofs be published? The URL of your content-addressed store", `${origin.replace(/\/+$/, "")}/cas/`, (v) => validateCasUrl(v, "--cas-url"));
     } else {
-      rest.identity ??= await ask("identity", "identity (signing identity, e.g. an email or a GitHub workflow URL)");
-      rest.issuer ??= await ask("issuer", "issuer (OIDC issuer)", "https://token.actions.githubusercontent.com");
+      rest.identity ??= await ask("identity", "Which identity signs your releases? An email, or a GitHub workflow URL such as https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main");
+      rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
     }
     return { ...rest, origin, version, type, csp, maxAge };
   } finally {
@@ -119,22 +165,8 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
 
 export async function runInit(options: InitOptions): Promise<void> {
   const a = await answers(options);
-  validateAll([
-    () => {
-      try {
-        if (new URL(a.origin).protocol !== "https:") throw new Error("must use https://");
-      } catch (err) {
-        throw invalid(`--origin must be an https URL: ${causeOf(err)}`);
-      }
-    },
-    () => {
-      try {
-        validateCSP(a.csp);
-      } catch (err) {
-        throw invalid(`--csp must be a WEBCAT-compatible CSP: ${causeOf(err)}`);
-      }
-    },
-  ]);
+  // Flags skip the prompts, so their values are checked here.
+  validateAll([() => httpsOrigin(a.origin), () => compatibleCsp(a.csp), () => wholeNumber("max-age")(String(a.maxAge))]);
   const chosen = SIGSUM_POLICIES[a.policy ?? "test"];
   const policyText =
     a.type !== "sigsum"
