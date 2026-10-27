@@ -88,7 +88,7 @@ export async function sigsumEnrollmentFromPolicy(policyText: string): Promise<{ 
   return { policy: toBase64Url(compiled), logs: Object.fromEntries(entries) };
 }
 
-// Runs sigsum-submit on the canonical manifest, attaches the proof under the signer's key, and returns it.
+// Runs sigsum-submit on the canonical manifest and attaches the proof to it under the signer's key.
 export async function signManifestWithSigsum(document: ManifestDocument, options: SigsumSignOptions): Promise<void> {
   if (Array.isArray(document.signatures)) {
     throw invalid("manifest.signatures already contains Sigstore bundles, sigsum proofs cannot be mixed in");
