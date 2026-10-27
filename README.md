@@ -491,6 +491,7 @@ or a JSON equivalent) matching the schema below:
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Optional, `index.html`. The file a directory path stands for: `/docs/` gets the hash of `/docs/index.html`. |
 | `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `manifest generate`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |
+| `clean_urls` | boolean | Optional, `false`. Set when the host serves `/about.html` at `/about` (Vercel `cleanUrls`, Netlify "pretty URLs"): manifest paths, `default_index` and `fallbacks` drop the `.html`, and `webcat dev` serves them that way. |
 | `wasm` | string[] | Optional list of base64url SHA-256 digests for inline WebAssembly modules. `.wasm` files are added automatically during generation. |
 | `extra_csp` | Record<string, string> | Optional per-path CSP overrides; keys must start with `/`. | `{}` or `{ "/app": "default-src 'none'" }` |
 

@@ -413,9 +413,9 @@ manifest
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
     const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
-    const [config, scan, timestamp] = await Promise.all([
-      loadManifestConfig(options.config),
-      scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: [...(options.exclude ?? []), ...insideDirectory(options.directory, options.config, options.output)] }),
+    const config = await loadManifestConfig(options.config);
+    const [scan, timestamp] = await Promise.all([
+      scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, cleanUrls: config.clean_urls, excludePaths: [...(options.exclude ?? []), ...insideDirectory(options.directory, options.config, options.output)] }),
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };

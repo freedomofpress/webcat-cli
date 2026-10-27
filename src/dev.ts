@@ -72,6 +72,7 @@ export interface SiteOptions {
   bundle: string;
   enrollment: string;
   fallback?: string; // path of the page served for unknown routes
+  cleanUrls?: boolean; // serve /about from about.html
   tls: { cert: string; key: string };
   onBundleFetch?: () => void; // the extension fetches the bundle only for an origin it holds as enrolled
 }
@@ -87,14 +88,22 @@ export function serveSite(o: SiteOptions): Promise<() => void> {
       res.writeHead(200, { ...headers, "content-type": "application/json" });
       return res.end(json);
     }
-    let file = path.join(o.directory, pathname.endsWith("/") ? `${pathname}${o.manifest.default_index ?? "index.html"}` : pathname);
+    const index = o.manifest.default_index ?? "index.html";
+    const isFile = async (f: string) => (await stat(f).catch(() => null))?.isFile() === true;
+    let file = path.join(o.directory, pathname.endsWith("/") ? `${pathname}${index}` : pathname);
     let status = 200;
-    if (!(await stat(file).catch(() => null))?.isFile()) {
+    for (const candidate of o.cleanUrls ? [file, `${file}.html`] : [file]) {
+      if (await isFile(candidate)) {
+        file = candidate;
+        break;
+      }
+    }
+    if (!(await isFile(file))) {
       if (!o.fallback) {
         res.writeHead(404, headers);
         return res.end();
       }
-      [file, status] = [path.join(o.directory, o.fallback), 404];
+      [file, status] = [path.join(o.directory, o.cleanUrls && !(await isFile(path.join(o.directory, o.fallback))) ? `${o.fallback}.html` : o.fallback), 404];
     }
     res.writeHead(status, { ...headers, "content-type": TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream" });
     createReadStream(file).pipe(res);
@@ -275,7 +284,7 @@ export async function runDev(o: { directory: string; config: string; host: strin
 
     // 2. The manifest from the directory, timestamped and signed on the test log.
     const config = await loadManifestConfig(o.config);
-    const [scan, timestamp] = await Promise.all([scanDirectory(o.directory), fetchTimestampFromPolicy(SIGSUM_TEST_POLICY)]);
+    const [scan, timestamp] = await Promise.all([scanDirectory(o.directory, { cleanUrls: config.clean_urls }), fetchTimestampFromPolicy(SIGSUM_TEST_POLICY)]);
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
     for (const written of await writeFallbackCopies(o.directory, config, document.manifest)) log(`wrote ${written}`);
     await signManifestWithSigsum(document, { policyFile, key: keyPaths[0], enrollment });
@@ -294,6 +303,7 @@ export async function runDev(o: { directory: string; config: string; host: strin
         bundle: JSON.stringify({ enrollment, manifest: document.manifest, signatures: document.signatures }),
         enrollment: JSON.stringify(enrollment),
         fallback: config.fallbacks[0],
+        cleanUrls: config.clean_urls,
         tls,
         onBundleFetch: () => log("the extension fetched the bundle: the origin is enrolled"),
       }),

@@ -329,7 +329,7 @@ describe("manifest configuration", () => {
   it("builds manifests with the extension's rules", () => {
     const hash = toBase64Url(createHash("sha256").update("x").digest());
     const scan = { files: new Map([["/index.html", hash], ["/docs/index.html", "D".repeat(42) + "A"], ["/404.html", "E".repeat(42) + "A"]]), wasm: new Set<string>() };
-    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], wasm: [], extra_csp: {} };
+    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], clean_urls: false, wasm: [], extra_csp: {} };
     const built = buildManifest(config, scan);
     // Directory keys next to each index, the fallback as a hash, and the legacy fields for extensions before 3.2.0.
     expect(Object.keys(built.files)).toEqual(["/", "/404.html", "/docs/", "/docs/index.html", "/index.html"]);
@@ -407,6 +407,12 @@ describe("directory scanning", () => {
     await writeFile(path.join(dir, "trust_policy"), "policy");
     await mkdir(path.join(dir, "keys"));
     await writeFile(path.join(dir, "keys", "key1"), "private");
+
+    // Clean URLs: the extension is dropped from every html path, index included.
+    await mkdir(path.join(dir, "docs"));
+    await writeFile(path.join(dir, "docs", "index.html"), "docs");
+    await writeFile(path.join(dir, "about.html"), "about");
+    expect([...(await scanDirectory(dir, { cleanUrls: true, excludePaths: ["/private", "ignore.txt"] })).files.keys()].sort()).toEqual(["/about", "/docs/index", "/index"]);
 
     const result = await scanDirectory(dir, { excludePaths: ["/private", "ignore.txt"] });
     expect(result.files.has("/index.html")).toBe(true);

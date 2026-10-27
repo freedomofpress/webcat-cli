@@ -11,6 +11,7 @@ export type ManifestContent = Manifest;
 export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "default_index" | "default_fallback" | "fallback_hashes"> & {
   default_index: string;
   fallbacks: string[];
+  clean_urls: boolean; // the host serves /about.html at /about, as Vercel and Netlify do: manifest paths drop the extension
 };
 
 // Where each fallback is published under its hash, so auditors can find what the manifest accepts.
@@ -30,7 +31,11 @@ export interface DirectoryScanResult {
 export interface DirectoryScanOptions {
   includeDotfiles?: boolean;
   excludePaths?: string[];
+  cleanUrls?: boolean; // list /about.html as /about
 }
+
+// The path a file is served at under clean URLs.
+export const cleanUrl = (p: string): string => p.replace(/\.html$/, "");
 
 // Build output hosts do not serve, so listing it makes the manifest unverifiable (per each host's docs; there is no standard).
 const HOST_ONLY_FILES = new Set([
@@ -93,8 +98,9 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   const wasm = c.wasm ?? [];
   const extra_csp = c.extra_csp ?? {};
   c.default_index ??= "index.html";
+  const clean_urls = c.clean_urls === true;
   // default_fallback is the pre-3.2.0 spelling of a single fallback (#263).
-  const fallbacks = c.fallbacks ?? (c.default_fallback === undefined ? [`/${String(c.default_index).replace(/^\/+/, "")}`] : [c.default_fallback]);
+  const fallbacks = (c.fallbacks ?? (c.default_fallback === undefined ? [`/${String(c.default_index).replace(/^\/+/, "")}`] : [c.default_fallback])) as unknown;
   validateAll([
     () => {
       try {
@@ -125,8 +131,9 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     app: str("app"),
     version: str("version"),
     default_csp: str("default_csp"),
-    default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
-    fallbacks: fallbacks as string[],
+    default_index: (clean_urls ? cleanUrl : (s: string) => s)(str("default_index").replace(/^\/+/, "")), // appended to directory paths
+    fallbacks: (fallbacks as string[]).map(clean_urls ? cleanUrl : (s) => s),
+    clean_urls,
     wasm: wasm as string[],
     extra_csp: extra_csp as Record<string, string>,
   };
@@ -164,7 +171,7 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
       if (path.extname(entry.name).toLowerCase() === ".wasm") {
         result.wasm.add(encoded);
       } else {
-        result.files.set(`/${relativePath}`, encoded);
+        result.files.set(options.cleanUrls ? cleanUrl(`/${relativePath}`) : `/${relativePath}`, encoded);
       }
     }
   }
@@ -213,7 +220,7 @@ export async function writeFallbackCopies(directory: string, config: ManifestCon
   for (const p of config.fallbacks) {
     const target = `${HASHES_PATH}${manifest.files[p]}`;
     await mkdir(path.join(directory, HASHES_PATH), { recursive: true });
-    await copyFile(path.join(directory, p), path.join(directory, target));
+    await copyFile(path.join(directory, config.clean_urls ? `${p}.html` : p), path.join(directory, target));
     written.push(target);
   }
   return written;
