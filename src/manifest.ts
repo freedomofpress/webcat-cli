@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { SerializedBundle } from "@sigstore/bundle";
 import type { Manifest, SigsumSignatures } from "@freedomofpress/webcat/webcat/interfaces/bundle";
@@ -7,7 +7,14 @@ import { validateCSP, validateManifest } from "@freedomofpress/webcat/webcat/val
 import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url, validateAll } from "./utils.js";
 
 export type ManifestContent = Manifest;
-export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp">;
+// What webcat.config.json holds: fallbacks are paths here and hashes in the manifest.
+export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "default_index" | "default_fallback" | "fallback_hashes"> & {
+  default_index: string;
+  fallbacks: string[];
+};
+
+// Where each fallback is published under its hash, so auditors can find what the manifest accepts.
+export const HASHES_PATH = "/.well-known/webcat/hashes/";
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
 export interface ManifestDocument {
@@ -45,11 +52,12 @@ const sortedEntries = <T>(record: Record<string, T>): Record<string, T> =>
 const isRecordOfStrings = (value: unknown): value is Record<string, string> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every((v) => typeof v === "string");
 
-// Everything the extension checks on a manifest, plus its CSP rules on every policy string.
-export function validateManifestContent(manifest: ManifestContent, subject = "manifest"): void {
+// Everything the extension checks on a manifest, plus its CSP rules on every policy string, plus `more`.
+export function validateManifestContent(manifest: ManifestContent, subject = "manifest", more: Array<() => void> = []): void {
   const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp ?? {}).map(([k, v]) => [`extra_csp['${k}']`, v])];
   validateAll([
     () => check(validateManifest(manifest), subject),
+    ...more,
     // Extensions before 3.2.0 require both and reject a manifest whose entries do not resolve (#263).
     () => {
       if (manifest.default_index && !manifest.files[`/${manifest.default_index}`]) {
@@ -84,6 +92,9 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   };
   const wasm = c.wasm ?? [];
   const extra_csp = c.extra_csp ?? {};
+  c.default_index ??= "index.html";
+  // default_fallback is the pre-3.2.0 spelling of a single fallback (#263).
+  const fallbacks = c.fallbacks ?? (c.default_fallback === undefined ? [`/${String(c.default_index).replace(/^\/+/, "")}`] : [c.default_fallback]);
   validateAll([
     () => {
       try {
@@ -92,7 +103,12 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
         throw invalid(`config.app must be a valid URL: ${causeOf(err)}`);
       }
     },
-    ...["version", "default_csp", "default_index", "default_fallback"].map((key) => () => str(key)),
+    ...["version", "default_csp", "default_index"].map((key) => () => str(key)),
+    () => {
+      if (!Array.isArray(fallbacks) || !fallbacks.every((f) => typeof f === "string" && f.startsWith("/"))) {
+        throw invalid("config.fallbacks must be an array of '/'-prefixed paths");
+      }
+    },
     () => {
       if (!Array.isArray(wasm) || !wasm.every((w) => typeof w === "string")) {
         throw invalid("config.wasm must be an array of strings");
@@ -110,7 +126,7 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     version: str("version"),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
-    default_fallback: str("default_fallback"),
+    fallbacks: fallbacks as string[],
     wasm: wasm as string[],
     extra_csp: extra_csp as Record<string, string>,
   };
@@ -157,20 +173,64 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
   return result;
 }
 
+// A 3.2.0 manifest (directory keys, fallback_hashes) that extensions before 3.2.0 still read through
+// default_index and default_fallback (#263); drop those two once such extensions are gone.
+// shortcut: every index file is listed next to its directory key, as pre-3.2.0 extensions resolve "/"
+// through "/index.html"; when the two legacy fields go, add a config switch to list the directory key only.
 export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
+  const files = Object.fromEntries(scan.files);
+  const suffix = `/${config.default_index}`;
+  for (const p of Object.keys(files)) {
+    if (p.endsWith(suffix)) files[p.slice(0, 1 - suffix.length)] ??= files[p];
+  }
+  const fallbacks = config.fallbacks.filter((p) => files[p]); // the missing ones are reported below
+  const fallback_hashes = fallbacks.map((p) => files[p]);
   const manifest: ManifestContent = {
     app: config.app,
     version: config.version,
     default_csp: config.default_csp,
-    files: sortedEntries(Object.fromEntries(scan.files)),
+    files: sortedEntries(files),
+    ...(fallback_hashes.length ? { fallback_hashes } : {}),
     default_index: config.default_index,
-    default_fallback: config.default_fallback,
+    ...(fallbacks.length ? { default_fallback: fallbacks[0] } : {}),
     wasm: Array.from(new Set([...config.wasm, ...scan.wasm])).sort(),
     extra_csp: sortedEntries(config.extra_csp),
     ...(timestamp ? { timestamp } : {}),
   };
-  validateManifestContent(manifest, "config");
+  validateManifestContent(
+    manifest,
+    "config",
+    config.fallbacks.map((p) => () => {
+      if (!files[p]) throw invalid(`config.fallbacks must name scanned files, '${p}' was not found`);
+    }),
+  );
   return manifest;
+}
+
+// Copies each fallback to <directory>/.well-known/webcat/hashes/<hash>; returns the paths written.
+export async function writeFallbackCopies(directory: string, config: ManifestConfig, manifest: ManifestContent): Promise<string[]> {
+  const written: string[] = [];
+  for (const p of config.fallbacks) {
+    const target = `${HASHES_PATH}${manifest.files[p]}`;
+    await mkdir(path.join(directory, HASHES_PATH), { recursive: true });
+    await copyFile(path.join(directory, p), path.join(directory, target));
+    written.push(target);
+  }
+  return written;
+}
+
+// The manifest as a 3.2.0 extension reads it: legacy default_index and default_fallback rewritten
+// into directory keys and fallback_hashes, explicit values winning.
+export function effectiveManifest(manifest: ManifestContent): ManifestContent {
+  const files = { ...manifest.files };
+  if (manifest.default_index) {
+    const suffix = `/${manifest.default_index}`;
+    for (const p of Object.keys(files)) {
+      if (p.endsWith(suffix)) files[p.slice(0, 1 - suffix.length)] ??= files[p];
+    }
+  }
+  const fallback_hashes = manifest.fallback_hashes ?? (manifest.default_fallback ? [manifest.files[manifest.default_fallback]].filter(Boolean) : []);
+  return { ...manifest, files, fallback_hashes };
 }
 
 function parseManifestSignatures(value: unknown): ManifestSignatures | undefined {

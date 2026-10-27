@@ -214,7 +214,7 @@ export async function runInit(options: InitOptions): Promise<void> {
           maxAge: a.maxAge,
         });
 
-  const config = { app: a.origin, version: a.version, default_csp: a.csp, default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
+  const config = { app: a.origin, version: a.version, default_csp: a.csp, default_index: "index.html", fallbacks: ["/index.html"], wasm: [], extra_csp: {} };
   const files: Array<[string, string]> = [
     ["webcat.config.json", JSON.stringify(config, null, 2) + "\n"],
     ...(a.type === "sigsum" ? [["trust_policy", policyText] as [string, string]] : []),

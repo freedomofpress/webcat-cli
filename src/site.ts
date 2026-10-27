@@ -6,7 +6,7 @@ import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type BundleDocument, describeValidity, parseBundleObject, verifyBundle } from "./bundle.js";
 import { bareDomain, enrollmentHashHex, fetchDomainStatus, fetchServedEnrollment } from "./chain.js";
 import { EnrollmentTypes } from "./enrollment.js";
-import { type ManifestContent, isHostOnlyFile } from "./manifest.js";
+import { HASHES_PATH, type ManifestContent, effectiveManifest, isHostOnlyFile } from "./manifest.js";
 import { fetchCommunityTrustedRoot, trustedRootDrift } from "./sigstore.js";
 import { causeOf, describeWebcatError, external, sha256, toBase64Url } from "./utils.js";
 
@@ -21,6 +21,7 @@ export interface SiteReport {
   enrollment: string;
   trustedRoot: string[]; // drift lines for Sigstore enrollments, empty when up to date or not applicable
   paths: PathCheck[];
+  fallbacks: string[]; // warnings: fallback hashes not published under HASHES_PATH; the extension does not need them
 }
 
 const FORBIDDEN_HEADERS = ["refresh", "link"];
@@ -37,13 +38,9 @@ export function expectedCsp(manifest: ManifestContent, pathname: string): string
   return best ? extra[best] : manifest.default_csp;
 }
 
-// Mirrors the extension's file lookup: the path itself, a directory's default index, or (documents only) the fallback.
-export function expectedHash(manifest: ManifestContent, pathname: string, isDocument: boolean): string | undefined {
-  return (
-    manifest.files[pathname] ??
-    (pathname.endsWith("/") && manifest.default_index ? manifest.files[pathname + manifest.default_index] : undefined) ??
-    (isDocument && manifest.default_fallback ? manifest.files[manifest.default_fallback] : undefined)
-  );
+// Mirrors the extension's file lookup on an effective manifest: the keyed hash, plus (documents only) any fallback.
+export function acceptableHashes(manifest: ManifestContent, pathname: string, isDocument: boolean): string[] {
+  return [...(manifest.files[pathname] ? [manifest.files[pathname]] : []), ...(isDocument ? (manifest.fallback_hashes ?? []) : [])];
 }
 
 export function checkHeaders(manifest: ManifestContent, pathname: string, headers: Headers): string[] {
@@ -110,13 +107,13 @@ async function checkPath(origin: string, manifest: ManifestContent, pathname: st
   }
   // The extension checks content, not status: a 404 fallback that matches is fine.
   const status = response.status === 200 ? "" : `HTTP ${response.status}, `;
-  const expected = expectedHash(manifest, pathname, isDocument);
-  if (!expected) {
+  const accepted = acceptableHashes(manifest, pathname, isDocument);
+  if (accepted.length === 0) {
     problems.push(`${status}not in manifest.files, the extension would deny it`);
   } else {
     const served = toBase64Url(sha256(new Uint8Array(await response.arrayBuffer())));
-    if (served !== expected) {
-      problems.push(`${status}content does not match the manifest: served ${served}, manifest ${expected}`);
+    if (!accepted.includes(served)) {
+      problems.push(`${status}content does not match the manifest: served ${served}, manifest ${accepted.join(" or ")}`);
       if (isHostOnlyFile(pathname)) problems.push(`hosts usually do not serve this file: regenerate the manifest with --exclude ${pathname.slice(1)}`);
     }
   }
@@ -174,7 +171,7 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
   }
   const previous = await fetchBundle(origin + defaults.bundlePrevPath);
   if (!current.bundle) {
-    return { bundle: current.verdict, previousBundle: previousVerdict(previous), enrollment: "not checked, the bundle did not parse", trustedRoot: [], paths: [] };
+    return { bundle: current.verdict, previousBundle: previousVerdict(previous), enrollment: "not checked, the bundle did not parse", trustedRoot: [], paths: [], fallbacks: [] };
   }
   const bundleHash = enrollmentHashHex(current.bundle.enrollment);
   const [served, status] = await Promise.all([
@@ -197,8 +194,8 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
         ? "chain agrees"
         : `MISMATCH: the chain records ${status.canonical ?? "nothing"}, browsers will not verify this site`;
   const enrollment = `bundle embeds ${bundleHash}; ${servedPart}; ${chainPart}`;
-  const manifest = current.bundle.manifest.manifest;
-  const paths = options.paths?.length ? options.paths : ["/", ...Object.keys(manifest.files)];
+  const manifest = effectiveManifest(current.bundle.manifest.manifest);
+  const paths = options.paths?.length ? options.paths : [...new Set(["/", ...Object.keys(manifest.files)])];
   const trustedRoot =
     current.bundle.enrollment.type === EnrollmentTypes.Sigstore ? trustedRootDrift(current.bundle.enrollment.trusted_root, await fetchCommunityTrustedRoot()) : [];
   return {
@@ -207,5 +204,15 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
     enrollment,
     trustedRoot,
     paths: await mapLimit(paths, 8, (p) => checkPath(origin, manifest, p), options.onProgress),
+    fallbacks: (await Promise.all((manifest.fallback_hashes ?? []).map((hash) => checkFallbackCopy(origin, hash)))).filter((w): w is string => w !== null),
   };
+}
+
+// Each fallback should be published under its hash so auditors can read what the manifest accepts.
+async function checkFallbackCopy(origin: string, hash: string): Promise<string | null> {
+  const url = `${origin}${HASHES_PATH}${hash}`;
+  const response = await fetch(url).catch(() => null);
+  if (!response?.ok) return `${url}: ${response ? `HTTP ${response.status}` : "not reachable"}; publish the fallback there (manifest generate writes it)`;
+  const served = toBase64Url(sha256(new Uint8Array(await response.arrayBuffer())));
+  return served === hash ? null : `${url}: content hashes to ${served}, not ${hash}`;
 }

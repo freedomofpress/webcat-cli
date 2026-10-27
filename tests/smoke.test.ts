@@ -40,7 +40,7 @@ describe("command line", () => {
     await writeFile(config, JSON.stringify({ app: "https://example.org", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html" }));
     const { stdout, code } = webcat("manifest", "generate", "--type", "sigstore", "-c", config, "-d", dir);
     expect(code).toBe(0);
-    expect(Object.keys(JSON.parse(stdout).manifest.files)).toEqual(["/index.html"]);
+    expect(Object.keys(JSON.parse(stdout).manifest.files)).toEqual(["/", "/index.html"]);
   });
 
   it("reports every missing flag at once with exit 2", () => {
