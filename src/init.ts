@@ -244,7 +244,7 @@ Next steps${dns}
   2. Send this header on every response, byte for byte:
        Content-Security-Policy: ${a.csp}
   3. Build the site, then generate, sign and bundle the manifest:
-       webcat manifest generate${a.type === "sigsum" ? "" : " --type sigstore"} -d <build dir> -o manifest.json
+       webcat manifest generate${a.type === "sigsum" ? "" : " --type sigstore"} -d <build dir> -o manifest.json      # <build dir>: the directory you serve, . if it is this one
        ${sign}
        webcat bundle create -o .well-known/webcat/bundle.json
   4. Deploy, then check what visitors will see:   webcat site check ${host}

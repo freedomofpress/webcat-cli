@@ -267,8 +267,9 @@ The `manifest` namespace operates on WEBCAT manifests:
 | `manifest hash` | Canonicalize and SHA-256 hash a manifest, outputting a base64url digest. |
 | `manifest verify` | Verify a manifest (or bundle) against its enrollment: Sigsum signer threshold, or Sigstore bundles against the enrollment claims and trusted root. Exits 1 on failure. |
 
-`manifest generate` skips dotfiles and dotfolders by default; pass `--include-dotfiles` to include them. Use
-`--exclude <path>` (repeatable) to omit specific files or directories from the scan.
+`manifest generate` skips dotfiles and dotfolders by default; pass `--include-dotfiles` to include them. It also
+skips what `init` writes next to the site (`webcat.config.json`, `trust_policy`, `keys/`) and its own config and
+output files when they are inside the directory. Use `--exclude <path>` (repeatable) to omit anything else.
 
 Example – hash the provided manifest:
 

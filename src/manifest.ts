@@ -118,7 +118,8 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
 
 export async function scanDirectory(rootDir: string, options: DirectoryScanOptions = {}): Promise<DirectoryScanResult> {
   const result: DirectoryScanResult = { files: new Map(), wasm: new Set() };
-  const excludePaths = (options.excludePaths ?? [])
+  // What init writes next to the site, never meant to be served; keys/ holds private keys.
+  const excludePaths = ["webcat.config.json", "trust_policy", "keys", ...(options.excludePaths ?? [])]
     .map((raw) => raw.trim().replace(/\\/g, "/").replace(/^\.?\/*/, "").replace(/\/+$/, ""))
     .filter(Boolean);
   const isExcluded = (relativePath: string) =>
