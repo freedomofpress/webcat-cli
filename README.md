@@ -194,6 +194,24 @@ npx webcat init --origin https://example.org --signer <hex pubkey> --cas-url htt
 npx webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
 ```
 
+## Trying a site live: `webcat dev`
+
+```sh
+npx webcat dev -d dist
+```
+
+Signs the directory with a throwaway Sigsum enrollment on the test logs (one key generated on the spot,
+threshold 1, the same policy the integration tests use), serves it at `https://app.localhost:8443/` with
+the manifest's policy on every response and the fallback page for unknown routes, and opens it in a
+fresh Firefox profile with the test build of the extension installed as a temporary add-on. That build
+trusts an enrollment list served at `http://localhost:1234/`, which `dev` provides, instead of the
+chain. The extension icon shows the verification state as a visitor would see it; errors show the
+extension's error page.
+
+Needs `sigsum-key`, `sigsum-submit` and `openssl` on the PATH, network access to the Sigsum test log,
+and Firefox (`--firefox <path>` if it is not in the default place). `--host` changes the name,
+`--no-browser` runs only the servers. Everything is thrown away on Ctrl-C.
+
 ## Enrollment helpers
 
 The `enrollment` namespace manages Sigsum or Sigstore enrollment payloads. Sigsum enrollments

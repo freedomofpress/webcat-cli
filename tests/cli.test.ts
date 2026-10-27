@@ -569,6 +569,47 @@ describe("csp from a site", () => {
   });
 });
 
+describe("dev server pieces", () => {
+  it("writes an enrollment list the extension's own parser reads back", async () => {
+    const { canonicalKey, leafValue, mockBlock, mockList } = await import("../src/dev");
+    const hash = "ab".repeat(32);
+    expect(canonicalKey("app.localhost")).toBe("canonical/.localhost.app");
+    expect(leafValue(hash)).toBe(`0a20${hash}`);
+    expect(parseListLeaves(JSON.parse(mockList("app.localhost", hash)).leaves)).toEqual(new Map([["app.localhost", hash]]));
+    expect(JSON.parse(mockBlock(new Date(0))).signed_header.header).toMatchObject({ chain_id: "webcat-test-02", time: "1970-01-01T00:00:00.000Z" });
+  });
+
+  it("trusts the self-signed certificate in the profile and speaks the debugging protocol framing", async () => {
+    const { Rdp, certOverrideLines, selfSignedCert, userJs } = await import("../src/dev");
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-dev-"));
+    const { cert } = await selfSignedCert(dir, "app.localhost");
+    expect(certOverrideLines(cert, ["app.localhost", "127.0.0.1"], 8443)).toMatch(
+      /^app\.localhost:8443\tOID\.2\.16\.840\.1\.101\.3\.4\.2\.1\t([0-9A-F]{2}:){31}[0-9A-F]{2}\t[A-Za-z0-9+/=]+\n127\.0\.0\.1:8443\t/,
+    );
+    expect(userJs({ a: true, b: "x" })).toBe('user_pref("a", true);\nuser_pref("b", "x");\n');
+    await rm(dir, { recursive: true, force: true });
+
+    // A fake Firefox: hello on connect, an event to be ignored, then the reply, split across writes.
+    const { createServer } = await import("node:net");
+    const server = createServer((socket) => {
+      const send = (o: object) => socket.write(`${JSON.stringify(o).length}:${JSON.stringify(o)}`);
+      send({ from: "root", applicationType: "browser" });
+      socket.on("data", () => {
+        send({ from: "root", type: "tabListChanged" });
+        const reply = JSON.stringify({ from: "root", addonsActor: "server1.conn0.addonsActor2" });
+        socket.write(`${reply.length}:${reply.slice(0, 10)}`);
+        setTimeout(() => socket.write(reply.slice(10)), 20);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const rdp = new Rdp();
+    await rdp.connect((server.address() as { port: number }).port);
+    expect((await rdp.request("root", "getRoot")).addonsActor).toBe("server1.conn0.addonsActor2");
+    rdp.close();
+    server.close();
+  });
+});
+
 describe("openssh public keys", () => {
   it("extracts the raw ed25519 key from an OpenSSH public key line", async () => {
     const { signerFromOpenSsh } = await import("../src/enrollment");
