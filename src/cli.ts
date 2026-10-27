@@ -165,24 +165,31 @@ csp
   .description("Explain what WEBCAT would reject in a policy, with the documented workaround for each, and suggest the nearest compatible policy")
   .argument("<policy-or-url>", "A policy string, or an https:// page to read the policy from")
   .action(async (input: string) => {
-    let policy = input;
-    if (/^https?:\/\//.test(input)) {
-      const header = await fetchSiteCsp(input);
-      if (!header) {
+    // One policy per response the extension validates: a page typed in, or every hop of a fetched page.
+    const hops = /^https?:\/\//.test(input) ? await fetchSiteCsp(input) : [{ url: input, csp: input }];
+    const policies = new Map<string, string[]>(); // policy -> the URLs sending it
+    for (const hop of hops) {
+      if (hop.location && new URL(hop.location).origin !== new URL(hop.url).origin) {
+        process.stdout.write(`NOT OK: ${hop.url} redirects to ${hop.location}: the extension rejects cross-origin redirects.\n`);
+        process.exitCode = 1;
+      }
+      if (hop.csp === null) {
         process.stdout.write(
-          `NOT OK: ${input} sends no Content-Security-Policy header. WEBCAT only reads the header and cannot support a policy set in a <meta> tag.\n` +
+          `NOT OK: ${hop.url} sends no Content-Security-Policy header. WEBCAT only reads the header and cannot support a policy set in a <meta> tag.\n` +
             `Start from a preset (webcat init picks one), or check a policy directly: webcat csp hint "${CSP_PRESETS.static.csp}"\n`,
         );
         process.exitCode = 1;
-        return;
+      } else {
+        (policies.get(hop.csp) ?? policies.set(hop.csp, []).get(hop.csp)!).push(hop.url);
       }
-      policy = header;
     }
-    process.stdout.write(`Policy: ${policy}\n\n`);
-    const report = hintCsp(policy);
-    process.stdout.write(formatCspReport(report));
-    if (!report.compatible) {
-      process.exitCode = 1;
+    for (const [policy, urls] of policies) {
+      process.stdout.write(`${hops.length > 1 ? `${urls.join(", ")}\n` : ""}Policy: ${policy}\n\n`);
+      const report = hintCsp(policy);
+      process.stdout.write(formatCspReport(report));
+      if (!report.compatible) {
+        process.exitCode = 1;
+      }
     }
   });
 

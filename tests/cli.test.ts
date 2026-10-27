@@ -505,6 +505,34 @@ describe("csp hints", () => {
   });
 });
 
+describe("csp from a site", () => {
+  it("returns one policy per response, redirects included, as the extension checks each", async () => {
+    const { createServer } = await import("node:http");
+    const { fetchSiteCsp } = await import("../src/csp");
+    const server = createServer((req, res) => {
+      if (req.url === "/old") res.writeHead(301, { location: "/new" });
+      else if (req.url === "/moved") res.writeHead(302, { location: "/new", "content-security-policy": "default-src 'self'" });
+      else if (req.url === "/away") res.writeHead(302, { location: "https://other.invalid/x", "content-security-policy": "default-src 'none'" });
+      else res.writeHead(200, { "content-security-policy": "default-src 'none'" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      expect(await fetchSiteCsp(`${base}/new`)).toEqual([{ url: `${base}/new`, csp: "default-src 'none'" }]);
+      expect(await fetchSiteCsp(`${base}/old`)).toEqual([
+        { url: `${base}/old`, csp: null, location: `${base}/new` },
+        { url: `${base}/new`, csp: "default-src 'none'" },
+      ]);
+      expect((await fetchSiteCsp(`${base}/moved`)).map((h) => h.csp)).toEqual(["default-src 'self'", "default-src 'none'"]);
+      // A cross-origin redirect is reported and not followed, as the extension cancels it.
+      expect(await fetchSiteCsp(`${base}/away`)).toEqual([{ url: `${base}/away`, csp: "default-src 'none'", location: "https://other.invalid/x" }]);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe("openssh public keys", () => {
   it("extracts the raw ed25519 key from an OpenSSH public key line", async () => {
     const { signerFromOpenSsh } = await import("../src/enrollment");

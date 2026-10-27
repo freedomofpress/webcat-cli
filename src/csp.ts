@@ -1,8 +1,8 @@
 // Explains what WEBCAT would reject in a CSP, grouped by what to do about it, following
 // docs.webcat.tech/webapp-developers/CSP.html, then proposes the nearest policy that passes the extension's validator.
 import { parseContentSecurityPolicy } from "@freedomofpress/webcat/webcat/parsers";
-import { cspErrors } from "@freedomofpress/webcat/webcat/validators";
-import { fetchOk } from "./utils.js";
+import { CspDirective, type CspError, cspErrors, RESTRICTED_DIRECTIVES } from "@freedomofpress/webcat/webcat/validators";
+import { causeOf, external } from "./utils.js";
 
 export const CSP_DOCS = "https://docs.webcat.tech/webapp-developers/CSP.html";
 
@@ -19,11 +19,6 @@ export interface CspReport {
   accepted: string[]; // accepted as is, with the docs' advice
   suggested: string;
 }
-
-const HASH = /^'sha(256|384|512)-[A-Za-z0-9+/_-]+={0,2}'$/i;
-const SCRIPT_OK = ["'none'", "'self'", "'wasm-unsafe-eval'"];
-const STYLE_OK = ["'none'", "'self'", "'unsafe-inline'", "'unsafe-hashes'"];
-const RESTRICTED = ["default-src", "script-src", "script-src-elem", "script-src-attr", "style-src", "style-src-elem", "style-src-attr", "object-src", "worker-src"];
 
 const GROUPS: Record<string, Omit<CspGroup, "items">> = {
   scriptOrigins: {
@@ -64,95 +59,77 @@ const GROUPS: Record<string, Omit<CspGroup, "items">> = {
     docs: "default-src and worker-src",
   },
   policies: { title: "Multiple policies", advice: ["A comma means several policies in one header. WEBCAT compares only the first and rejects the header: send exactly one policy."] },
-  other: { title: "Other", advice: ["Rejected by the extension's CSP validator."], docs: "the directive named above" },
 };
 
+// Where a rejection from the extension's validator goes: by directive, and for scripts by keyword or origin.
+function groupOf(e: CspError): keyof typeof GROUPS {
+  if (!e.directive) return "policies";
+  if (!e.source) return "missing";
+  switch (e.directive) {
+    case CspDirective.DefaultSrc:
+      return "defaultSrc";
+    case CspDirective.ObjectSrc:
+      return "plugins";
+    case CspDirective.WorkerSrc:
+      return "workerOrigins";
+    case CspDirective.ScriptSrcAttr:
+      return "scriptInline";
+    case CspDirective.ScriptSrc:
+    case CspDirective.ScriptSrcElem:
+      return e.source.startsWith("'") ? "scriptInline" : "scriptOrigins";
+    default:
+      return "styleOrigins";
+  }
+}
+
+// What to propose for a directive the validator left empty or missing; 'self' otherwise.
+const FILL: Partial<Record<string, string>> = { "default-src": "'none'", "object-src": "'none'", "script-src-attr": "'none'" };
+
 export function hintCsp(csp: string): CspReport {
-  const items: Record<string, string[]> = {};
+  const items: Partial<Record<keyof typeof GROUPS, string[]>> = {};
   const add = (group: keyof typeof GROUPS, item: string) => (items[group] ??= []).push(item);
   const accepted: string[] = [];
-  if (csp.includes(",")) add("policies", "policy");
   const d = parseContentSecurityPolicy(csp.split(",")[0].trim());
-  const out = new Map<string, string[]>();
-  const keep = (dir: string, ok: (s: string) => boolean, group: (s: string) => keyof typeof GROUPS): string[] => {
-    const kept: string[] = [];
-    for (const src of d.get(dir) ?? []) {
-      if (ok(src)) kept.push(src);
-      else add(group(src), `${dir} ${src}`);
-    }
-    return kept;
-  };
 
+  // Nearest policy: the given one minus every rejected source, plus every directive the validator asked for.
+  const out = new Map(d);
+  const errors = cspErrors(csp);
+  for (const e of errors) {
+    add(groupOf(e), e.directive ? (e.source ? `${e.directive} ${e.source}` : e.directive) : "policy");
+    if (e.directive) out.set(e.directive, (out.get(e.directive) ?? []).filter((s) => s !== e.source));
+  }
+  // Advice beyond the validator: default-src is best explicit, and 'none' next to other sources is ignored by browsers.
   const def = d.get("default-src");
   if (!def) {
     add("missing", "default-src");
+    out.set("default-src", []);
+  } else if (def.includes("'none'") && def.length > 1) {
+    add("defaultSrc", `default-src ${def.join(" ")}`);
     out.set("default-src", ["'none'"]);
-  } else {
-    const kept = keep("default-src", (s) => s === "'none'" || s === "'self'", () => "defaultSrc");
-    if (def.includes("'none'") && def.length > 1) add("defaultSrc", `default-src ${def.join(" ")}`);
-    out.set("default-src", kept.length === 0 || (kept.includes("'none'") && kept.length > 1) ? ["'none'"] : kept);
   }
-  // As the extension reads it: 'none' only counts when it is the sole source.
-  const strict = def?.length === 1 && def[0] === "'none'";
-
-  for (const dir of ["script-src", "script-src-elem"]) {
-    if (d.has(dir)) {
-      const kept = keep(dir, (s) => SCRIPT_OK.includes(s.toLowerCase()) || HASH.test(s), (s) => (s.startsWith("'") ? "scriptInline" : "scriptOrigins"));
-      out.set(dir, kept.length ? kept : ["'self'"]);
-    }
-  }
-  if (!d.has("script-src") && !strict) {
-    add("missing", "script-src");
-    out.set("script-src", ["'self'"]);
-  }
-  if (d.has("script-src-attr")) {
-    const kept = keep("script-src-attr", (s) => s === "'none'", () => "scriptInline");
-    out.set("script-src-attr", kept.length ? kept : ["'none'"]);
-  }
+  out.set("object-src", ["'none'"]);
+  for (const [dir, sources] of out) if (!sources.length) out.set(dir, [FILL[dir] ?? "'self'"]);
 
   for (const dir of ["style-src", "style-src-elem", "style-src-attr"]) {
-    if (d.has(dir)) {
-      const kept = keep(dir, (s) => STYLE_OK.includes(s.toLowerCase()) || HASH.test(s), () => "styleOrigins");
-      out.set(dir, kept.length ? kept : ["'self'"]);
-      for (const s of kept.filter((s) => s === "'unsafe-inline'" || s === "'unsafe-hashes'")) {
-        accepted.push(
-          `${dir} ${s}: accepted today but discouraged, and may be dropped in a future WEBCAT version. Prefer stylesheets served from your origin, or 'sha256-…' hashes for inline styles; keep it only while your framework injects inline styles you cannot avoid.`,
-        );
-      }
+    for (const s of (out.get(dir) ?? []).filter((s) => s === "'unsafe-inline'" || s === "'unsafe-hashes'")) {
+      accepted.push(
+        `${dir} ${s}: accepted today but discouraged, and may be dropped in a future WEBCAT version. Prefer stylesheets served from your origin, or 'sha256-…' hashes for inline styles; keep it only while your framework injects inline styles you cannot avoid.`,
+      );
     }
   }
-  if (!d.has("style-src") && !strict) {
-    add("missing", "style-src");
-    out.set("style-src", ["'self'"]);
-  }
-
-  if (d.has("object-src")) keep("object-src", (s) => s === "'none'", () => "plugins");
-  else if (!strict) add("missing", "object-src");
-  out.set("object-src", ["'none'"]);
-  if (d.has("worker-src")) {
-    const kept = keep("worker-src", (s) => s === "'none'" || s === "'self'", () => "workerOrigins");
-    out.set("worker-src", kept.length ? kept : ["'self'"]);
-  } else if (!strict || d.has("child-src")) {
-    add("missing", "worker-src");
-    out.set("worker-src", ["'self'"]);
-  }
-
-  const unrestricted: string[] = [];
-  for (const [dir, sources] of d) {
-    if (!RESTRICTED.includes(dir)) {
-      out.set(dir, sources);
-      if (sources.some((s) => !s.startsWith("'"))) unrestricted.push(dir);
-    }
-  }
+  const unrestricted = [...d].filter(([dir, sources]) => !RESTRICTED_DIRECTIVES.includes(dir as CspDirective) && sources.some((s) => !s.startsWith("'"))).map(([dir]) => dir);
   if (unrestricted.length) {
     accepted.push(
       `${unrestricted.join(", ")}: not restricted by WEBCAT, external sources here do not fail verification. The recommended practice is still to vendor everything you can and keep every directive on 'self': whatever loads from elsewhere is outside what WEBCAT verifies.`,
     );
   }
 
-  const suggested = [...out].map(([dir, sources]) => `${dir} ${sources.join(" ")}`).join("; ");
+  // Directives in the documented order, unrestricted ones last.
+  const order = (dir: string) => (RESTRICTED_DIRECTIVES.includes(dir as CspDirective) ? RESTRICTED_DIRECTIVES.indexOf(dir as CspDirective) : RESTRICTED_DIRECTIVES.length);
+  items.missing?.sort((a, b) => order(a) - order(b));
+  const suggested = [...out].sort(([a], [b]) => order(a) - order(b)).map(([dir, sources]) => `${dir} ${sources.join(" ")}`).join("; ");
   const [suggestedError] = cspErrors(suggested);
-  if (suggestedError) accepted.push(`the suggested policy still fails the validator (${suggestedError}); please report this.`);
+  if (suggestedError) accepted.push(`the suggested policy still fails the validator (${suggestedError.message}); please report this.`);
   // Fixed order (scripts first), and inline-script advice only for the sources that are actually present.
   const inlineAdvice = (list: string[]): string[] =>
     GROUPS.scriptInline.advice.filter((line, i) =>
@@ -164,12 +141,10 @@ export function hintCsp(csp: string): CspReport {
       ][i],
     );
   // The verdict is the extension's own validator on the policy as given; the groups only explain it.
-  const errors = cspErrors(csp);
   const compatible = errors.length === 0;
-  if (!compatible && Object.keys(items).length === 0) errors.forEach((e) => add("other", e));
-  const groups = compatible ? [] : Object.keys(GROUPS)
+  const groups = compatible ? [] : (Object.keys(GROUPS) as (keyof typeof GROUPS)[])
     .filter((key) => items[key])
-    .map((key) => ({ ...GROUPS[key], items: items[key], advice: key === "scriptInline" ? inlineAdvice(items[key]) : GROUPS[key].advice }));
+    .map((key) => ({ ...GROUPS[key], items: items[key]!, advice: key === "scriptInline" ? inlineAdvice(items[key]!) : GROUPS[key].advice }));
   return { compatible, groups, accepted, suggested };
 }
 
@@ -197,6 +172,30 @@ export function formatCspReport(report: CspReport): string {
   return lines.join("\n") + "\n";
 }
 
-// The policy a site sends in its header: the only place the extension reads one.
-export const fetchSiteCsp = async (url: string): Promise<string | null> =>
-  (await fetchOk(url, { redirect: "follow" })).headers.get("content-security-policy");
+export interface CspHop {
+  url: string;
+  csp: string | null;
+  location?: string; // the redirect target, absolute; the extension cancels when it is cross-origin
+}
+
+// The responses the extension validates for a page: each one needs a policy, redirects included, and a
+// redirect is followed only within the origin. The header is the only place the extension reads a policy from.
+export async function fetchSiteCsp(url: string): Promise<CspHop[]> {
+  const hops: CspHop[] = [];
+  while (hops.length < 10) {
+    const response = await fetch(url, { redirect: "manual" }).catch((err) => {
+      throw external(`failed to fetch ${url}: ${causeOf(err)}`);
+    });
+    const location = response.status >= 300 && response.status < 400 ? response.headers.get("location") : null;
+    if (!response.ok && !location) {
+      throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
+    }
+    const hop: CspHop = { url, csp: response.headers.get("content-security-policy") };
+    hops.push(hop);
+    if (!location) return hops;
+    hop.location = new URL(location, url).href;
+    if (new URL(hop.location).origin !== new URL(url).origin) return hops;
+    url = hop.location;
+  }
+  throw external(`${hops[0].url}: too many redirects`);
+}
