@@ -27,13 +27,12 @@ const FORBIDDEN_HEADERS = ["refresh", "link"];
 
 // Mirrors the extension's verifyCSP: exact extra_csp key, else the longest matching prefix, else the default.
 export function expectedCsp(manifest: ManifestContent, pathname: string): string {
-  const effectivePath = pathname === "/" ? manifest.default_index : pathname;
   const extra = manifest.extra_csp ?? {};
-  if (extra[effectivePath]) {
-    return extra[effectivePath];
+  if (extra[pathname]) {
+    return extra[pathname];
   }
   const best = Object.keys(extra)
-    .filter((prefix) => effectivePath.startsWith(prefix))
+    .filter((prefix) => pathname.startsWith(prefix))
     .sort((a, b) => b.length - a.length)[0];
   return best ? extra[best] : manifest.default_csp;
 }
@@ -42,8 +41,8 @@ export function expectedCsp(manifest: ManifestContent, pathname: string): string
 export function expectedHash(manifest: ManifestContent, pathname: string, isDocument: boolean): string | undefined {
   return (
     manifest.files[pathname] ??
-    (pathname.endsWith("/") ? manifest.files[pathname + manifest.default_index] : undefined) ??
-    (isDocument ? manifest.files[manifest.default_fallback] : undefined)
+    (pathname.endsWith("/") && manifest.default_index ? manifest.files[pathname + manifest.default_index] : undefined) ??
+    (isDocument && manifest.default_fallback ? manifest.files[manifest.default_fallback] : undefined)
   );
 }
 
@@ -125,7 +124,7 @@ async function checkPath(origin: string, manifest: ManifestContent, pathname: st
 }
 
 // A bundle a browser would reject is a verdict, not a crash: malformed JSON or shape is reported as FAILED.
-async function fetchBundle(url: string): Promise<{ bundle?: BundleDocument; verdict: string } | null> {
+async function fetchBundle(url: string): Promise<{ bundle?: BundleDocument; verdict: string; notBundle?: string } | null> {
   const response = await fetch(url).catch((err) => {
     throw external(`failed to fetch ${url}: ${causeOf(err)}`);
   });
@@ -139,14 +138,19 @@ async function fetchBundle(url: string): Promise<{ bundle?: BundleDocument; verd
   try {
     bundle = parseBundleObject(await response.json(), url);
   } catch (err) {
-    return { verdict: `FAILED: ${causeOf(err)}` };
+    // Catch-all servers answer every path with a page: no bundle there, as opposed to a broken one.
+    return { verdict: `FAILED: ${causeOf(err)}`, notBundle: `the server answered HTTP ${response.status} ${response.headers.get("content-type") ?? "without a content type"}` };
   }
   const result = await verifyBundle(bundle);
   const verdict = result instanceof WebcatError ? `FAILED: ${describeWebcatError(result)}` : `VERIFIED (${describeValidity(result)})`;
   return { bundle, verdict };
 }
 
-// ponytail: fixed-size worker pool; sites with thousands of files would want --path filters.
+// A missing previous bundle only matters while an enrollment is being rotated, and a catch-all page in its place is not one.
+const previousVerdict = (previous: Awaited<ReturnType<typeof fetchBundle>>): string =>
+  !previous ? "none" : previous.notBundle ? `none, ${previous.notBundle}, not a bundle; fine unless you are rotating the enrollment` : previous.verdict;
+
+// Fixed-size worker pool; sites with thousands of files would want --path filters.
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>, onProgress?: (done: number, total: number) => void): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
@@ -170,7 +174,7 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
   }
   const previous = await fetchBundle(origin + defaults.bundlePrevPath);
   if (!current.bundle) {
-    return { bundle: current.verdict, previousBundle: previous ? previous.verdict : "none", enrollment: "not checked, the bundle did not parse", trustedRoot: [], paths: [] };
+    return { bundle: current.verdict, previousBundle: previousVerdict(previous), enrollment: "not checked, the bundle did not parse", trustedRoot: [], paths: [] };
   }
   const bundleHash = enrollmentHashHex(current.bundle.enrollment);
   const [served, status] = await Promise.all([
@@ -199,7 +203,7 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
     current.bundle.enrollment.type === EnrollmentTypes.Sigstore ? trustedRootDrift(current.bundle.enrollment.trusted_root, await fetchCommunityTrustedRoot()) : [];
   return {
     bundle: current.verdict,
-    previousBundle: previous ? previous.verdict : "none",
+    previousBundle: previousVerdict(previous),
     enrollment,
     trustedRoot,
     paths: await mapLimit(paths, 8, (p) => checkPath(origin, manifest, p), options.onProgress),

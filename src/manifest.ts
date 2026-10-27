@@ -50,6 +50,17 @@ export function validateManifestContent(manifest: ManifestContent, subject = "ma
   const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp ?? {}).map(([k, v]) => [`extra_csp['${k}']`, v])];
   validateAll([
     () => check(validateManifest(manifest), subject),
+    // Extensions before 3.2.0 require both and reject a manifest whose entries do not resolve (#263).
+    () => {
+      if (manifest.default_index && !manifest.files[`/${manifest.default_index}`]) {
+        throw invalid(`${subject}.default_index must name a file in files, '/${manifest.default_index}' was not found`);
+      }
+    },
+    () => {
+      if (manifest.default_fallback && !manifest.files[manifest.default_fallback]) {
+        throw invalid(`${subject}.default_fallback must name a file in files, '${manifest.default_fallback}' was not found`);
+      }
+    },
     ...policies.map(([field, csp]) => () => {
       if (typeof csp !== "string") {
         throw invalid(`${subject}.${field} must be a CSP string`);
