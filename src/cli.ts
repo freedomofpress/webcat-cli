@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import path from "node:path";
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
@@ -388,6 +389,15 @@ enrollment
 // ---------------------------------------------------------------------------
 // manifest
 
+// The given files, as scan paths, when they sit inside the scanned directory: the config and output
+// of manifest generate are not part of the site.
+const insideDirectory = (directory: string, ...files: (string | undefined)[]): string[] =>
+  files.flatMap((file) => {
+    if (!file) return [];
+    const rel = path.relative(path.resolve(directory), path.resolve(file));
+    return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? [rel] : [];
+  });
+
 const manifest = program.command("manifest").description("Generate, sign, hash and verify manifests");
 
 manifest
@@ -404,7 +414,7 @@ manifest
     const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
     const [config, scan, timestamp] = await Promise.all([
       loadManifestConfig(options.config),
-      scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: options.exclude }),
+      scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: [...(options.exclude ?? []), ...insideDirectory(options.directory, options.config, options.output)] }),
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };

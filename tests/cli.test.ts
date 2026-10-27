@@ -373,10 +373,17 @@ describe("directory scanning", () => {
     await mkdir(path.join(dir, "private"));
     await writeFile(path.join(dir, "private", "hidden.txt"), "hidden");
 
+    // What init writes is never served, so it is skipped without being asked.
+    await writeFile(path.join(dir, "webcat.config.json"), "{}");
+    await writeFile(path.join(dir, "trust_policy"), "policy");
+    await mkdir(path.join(dir, "keys"));
+    await writeFile(path.join(dir, "keys", "key1"), "private");
+
     const result = await scanDirectory(dir, { excludePaths: ["/private", "ignore.txt"] });
     expect(result.files.has("/index.html")).toBe(true);
     expect(result.files.has("/ignore.txt")).toBe(false);
     expect(result.files.has("/private/hidden.txt")).toBe(false);
+    expect([...result.files.keys()].filter((p) => /webcat\.config|trust_policy|keys/.test(p))).toEqual([]);
 
     await rm(dir, { recursive: true, force: true });
   });
