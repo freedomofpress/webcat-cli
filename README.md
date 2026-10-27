@@ -209,8 +209,9 @@ chain. The extension icon shows the verification state as a visitor would see it
 extension's error page.
 
 Needs `sigsum-key`, `sigsum-submit` and `openssl` on the PATH, network access to the Sigsum test log,
-and Firefox (`--firefox <path>` if it is not in the default place). `--host` changes the name,
-`--no-browser` runs only the servers. Everything is thrown away on Ctrl-C.
+and Firefox (`--firefox <path>` if it is not in the default place). `-c` points at the config when it is
+not in the current directory, `--version` replaces a version the release workflow stamps from the tag,
+`--host` changes the name, `--no-browser` runs only the servers. Everything is thrown away on Ctrl-C.
 
 ## Enrollment helpers
 

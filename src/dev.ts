@@ -262,7 +262,7 @@ export async function makeProfile(certPem: string, host: string): Promise<string
 }
 
 // Everything `webcat dev` does, in order; returns a function that stops the servers and the browser.
-export async function runDev(o: { directory: string; config: string; host: string; firefox?: string; browser: boolean }): Promise<() => Promise<void>> {
+export async function runDev(o: { directory: string; config: string; version?: string; host: string; firefox?: string; browser: boolean }): Promise<() => Promise<void>> {
   const { DEFAULT_MAX_AGE, SIGSUM_TEST_POLICY } = await import("./init.js");
   const { buildEnrollmentObject } = await import("./enrollment.js");
   const { enrollmentHashHex } = await import("./chain.js");
@@ -284,6 +284,7 @@ export async function runDev(o: { directory: string; config: string; host: strin
 
     // 2. The manifest from the directory, timestamped and signed on the test log.
     const config = await loadManifestConfig(o.config);
+    if (o.version) config.version = o.version; // release workflows stamp it from the tag; a placeholder would fail the semver check
     const [scan, timestamp] = await Promise.all([scanDirectory(o.directory, { cleanUrls: config.clean_urls }), fetchTimestampFromPolicy(SIGSUM_TEST_POLICY)]);
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
     for (const written of await writeFallbackCopies(o.directory, config, document.manifest)) log(`wrote ${written}`);

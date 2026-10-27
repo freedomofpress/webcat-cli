@@ -587,12 +587,13 @@ program
   .description("Serve a site directory signed with a throwaway Sigsum test enrollment, and open it in a fresh Firefox profile with the WEBCAT test extension")
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
   .option("-c, --config <path>", "Manifest config JSON file", "webcat.config.json")
+  .option("--version <string>", "Manifest version, overriding the config (release workflows usually stamp it from the git tag)")
   .option("--host <name>", "Hostname to serve as; *.localhost names resolve in Firefox without DNS", "app.localhost")
   .option("--firefox <path>", "Firefox binary (default: /Applications/Firefox.app on macOS, `firefox` on PATH elsewhere)")
   .option("--no-browser", "Only run the servers; load the test extension in a browser of your own")
   .action(async (options) => {
     const { runDev } = await import("./dev.js");
-    const stop = await runDev({ directory: options.directory, config: options.config, host: options.host, firefox: options.firefox, browser: options.browser });
+    const stop = await runDev({ directory: options.directory, config: options.config, version: options.version, host: options.host, firefox: options.firefox, browser: options.browser });
     await new Promise<void>((resolve) => process.once("SIGINT", () => resolve()).once("SIGTERM", () => resolve()));
     await stop();
   });
