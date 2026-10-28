@@ -26,9 +26,9 @@ hinter that explains each incompatibility with the documented workaround and pro
 nearest policy that passes. It accepts a policy string or a page URL to read the policy from:
 
 ```sh
-npx webcat csp check "default-src 'none'; script-src 'self'; style-src 'self'"
-npx webcat csp hint "default-src 'self'; script-src 'self' https://cdn.example 'unsafe-inline'"
-npx webcat csp hint https://example.org/
+webcat csp check "default-src 'none'; script-src 'self'; style-src 'self'"
+webcat csp hint "default-src 'self'; script-src 'self' https://cdn.example 'unsafe-inline'"
+webcat csp hint https://example.org/
 ```
 
 ## Decide and prepare enrollment information
@@ -79,7 +79,7 @@ Enroll once, naming the workflow that will sign (the identity is the workflow fi
 branch that runs it):
 
 ```sh
-npx webcat init --type sigstore \
+webcat init --type sigstore \
   --origin https://example.org \
   --identity https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
   --issuer https://token.actions.githubusercontent.com
@@ -101,9 +101,10 @@ jobs:
         with:
           node-version: 22
       - run: npm ci && npm run build                      # produces dist/
-      - run: npx @freedomofpress/webcat-cli manifest generate --type sigstore -d dist -o manifest.json
-      - run: npx @freedomofpress/webcat-cli manifest sign --type sigstore -o manifest.signed.json
-      - run: npx @freedomofpress/webcat-cli bundle create -o dist/.well-known/webcat/bundle.json
+      - run: npm install -g @freedomofpress/webcat-cli
+      - run: webcat manifest generate --type sigstore -d dist -o manifest.json
+      - run: webcat manifest sign --type sigstore -o manifest.signed.json
+      - run: webcat bundle create -o dist/.well-known/webcat/bundle.json
       - run: cp .well-known/webcat/enrollment.json dist/.well-known/webcat/
       # deploy dist/ as usual; keep the previous bundle.json as bundle-prev.json across enrollment changes
 ```
@@ -135,14 +136,14 @@ See the CI job above; every step is a plain CLI invocation.
 ## Installation
 
 ```sh
-npm install @freedomofpress/webcat-cli
+npm install -g @freedomofpress/webcat-cli
 ```
 
-To run the installed CLI:
+This puts `webcat` on the PATH:
 
 ```sh
-npx webcat --help
-npx webcat --version
+webcat --help
+webcat --version
 ```
 
 Informational messages are written to stderr, so command output (JSON, hashes) can be
@@ -189,9 +190,9 @@ or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, an
 so it runs unattended in CI:
 
 ```sh
-npx webcat init
-npx webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
-npx webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
+webcat init
+webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
+webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
 ```
 
 ## Enrollment helpers
@@ -212,20 +213,20 @@ and/or compatibility flags `--issuer` + `--identity`) and either `--trusted-root
 Example – hash the sample enrollment definition:
 
 ```sh
-npx webcat enrollment hash -i examples/enrollment.json
+webcat enrollment hash -i examples/enrollment.json
 # => sMShxw62oTUjfzQ35Q5WOnQria1sXHMdI3e9lqODk6c
 ```
 
 The canonicalized document (useful for audits) can be produced with:
 
 ```sh
-npx webcat enrollment canonicalize -i examples/enrollment.json
+webcat enrollment canonicalize -i examples/enrollment.json
 ```
 
 Sigstore enrollment example with claims (legacy `--identity` and `--issuer` are mapped to claims):
 
 ```sh
-npx webcat enrollment create \
+webcat enrollment create \
   --type sigstore \
   --community-trusted-root \
   --identity alice@example.com \
@@ -243,8 +244,8 @@ challenge, fetches the file itself, and votes for its hash on the enrollment cha
 quorum and a cool-down delay the hash becomes canonical and appears in the published list.
 
 ```sh
-npx webcat enrollment submit example.com -e enrollment.json   # -e checks the served file matches
-npx webcat enrollment status example.com
+webcat enrollment submit example.com -e enrollment.json   # -e checks the served file matches
+webcat enrollment status example.com
 ```
 
 `enrollment status` prints the hash the domain serves, what the chain holds (canonical,
@@ -274,15 +275,15 @@ output files when they are inside the directory. Use `--exclude <path>` (repeata
 Example – hash the provided manifest:
 
 ```sh
-npx webcat manifest hash -i examples/manifest.json
+webcat manifest hash -i examples/manifest.json
 # => KC20rk9wEouC18wkosAM2I7-ANnIxdBNTw6NibRGh88
 ```
 
 Example – verify a bundle, or an enrollment plus a signed manifest:
 
 ```sh
-npx webcat manifest verify examples/bundle.json
-npx webcat manifest verify --enrollment enrollment.json --manifest manifest.json
+webcat manifest verify examples/bundle.json
+webcat manifest verify --enrollment enrollment.json --manifest manifest.json
 ```
 
 Verification, and all enrollment, manifest and CSP validation, is done by
@@ -307,7 +308,7 @@ endpoints with `--fulcio-url`, `--rekor-url`, and `--tsa-url` when signing.
 To sign with Sigstore using an ambient OIDC token (for example, in CI):
 
 ```sh
-npx webcat manifest sign \
+webcat manifest sign \
   --type sigstore \
   --input manifest.json
 ```
@@ -315,7 +316,7 @@ npx webcat manifest sign \
 If you already have an OIDC ID token, you can pass it explicitly:
 
 ```sh
-npx webcat manifest sign \
+webcat manifest sign \
   --type sigstore \
   --input manifest.json \
   --oidc-token "$OIDC_ID_TOKEN"
@@ -324,7 +325,7 @@ npx webcat manifest sign \
 To perform an interactive device authorization flow (opens a browser and prompts for a code):
 
 ```sh
-npx webcat manifest sign \
+webcat manifest sign \
   --type sigstore \
   --input manifest.json \
   --interactive
@@ -333,7 +334,7 @@ npx webcat manifest sign \
 To use custom Sigstore infrastructure:
 
 ```sh
-npx webcat manifest sign \
+webcat manifest sign \
   --type sigstore \
   --input manifest.json \
   --fulcio-url https://fulcio.example.com \
@@ -364,8 +365,8 @@ header equal to the manifest's policy for that path, forbidden headers (`refresh
 `origin-agent-cluster` other than `?1`), redirects, and the content hash.
 
 ```sh
-npx webcat site check example.org
-npx webcat site check example.org --path / --path /app/main.js
+webcat site check example.org
+webcat site check example.org --path / --path /app/main.js
 ```
 
 Exits 1 when the bundle does not verify, the enrollment does not match, or any path has a problem.
@@ -386,7 +387,7 @@ Errors are printed to stderr as `Error: <message>`. Messages name the CLI flag (
 Use `bundle create` to combine an enrollment and a manifest (with signatures) into a WEBCAT bundle that can be distributed to verifiers:
 
 ```sh
-npx webcat bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
+webcat bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
 ```
 
 The resulting `bundle.json` matches the fixture located in `examples/bundle.json`.
@@ -430,7 +431,7 @@ TMPDIR=$(mktemp -d)
 echo index > "$TMPDIR/index.html"
 echo error > "$TMPDIR/error.html"
 
-npx webcat enrollment create \
+webcat enrollment create \
   --policy-file trust_policy \
   --threshold 1 \
   --max-age 15552000 \
@@ -439,24 +440,24 @@ npx webcat enrollment create \
   --signer "$HEX2" \
   --output enrollment.json
 
-npx webcat manifest generate \
+webcat manifest generate \
   --policy-file trust_policy \
   --config webcat.config.json \
   --directory "$TMPDIR" \
   --output manifest_unsigned.json
 
-npx webcat manifest sign \
+webcat manifest sign \
   --policy-file trust_policy \
   -i manifest_unsigned.json \
   -k keys/key1 \
   -o manifest.json
 
 # 4) Bundle and verify
-npx webcat bundle create \
+webcat bundle create \
   --enrollment enrollment.json \
   --manifest manifest.json \
   --output bundle.json
-npx webcat manifest verify bundle.json
+webcat manifest verify bundle.json
 ```
 
 The script prints intermediate JSON artifacts with `jq` so you can inspect the

@@ -41,32 +41,32 @@ cat > webcat.config.json <<EOF
 EOF
 
 # Create enrollment.json
-npm run start --  enrollment create --policy-file trust_policy --threshold 1 --max-age 15552000 --cas-url https://cas.demoelement.com --signer "$HEX1" --signer "$HEX2" --output enrollment.json
+webcat enrollment create --policy-file trust_policy --threshold 1 --max-age 15552000 --cas-url https://cas.demoelement.com --signer "$HEX1" --signer "$HEX2" --output enrollment.json
 jq . < enrollment.json
 
 # View the WEBCAT config file
 jq . < webcat.config.json
 
 # Generate unsigned manifest
-npm run start --  manifest generate --policy-file trust_policy --config webcat.config.json --directory "$TMPDIR" --output manifest_unsigned.json
+webcat manifest generate --policy-file trust_policy --config webcat.config.json --directory "$TMPDIR" --output manifest_unsigned.json
 
 #jq . < manifest_unsigned.json
 
 # ---------------------------------------------------------------------
 
 # Sign manifest"
-npm run start --  manifest sign --policy-file trust_policy -i manifest_unsigned.json -k keys/key1 -o manifest.json
+webcat manifest sign --policy-file trust_policy -i manifest_unsigned.json -k keys/key1 -o manifest.json
 
 jq . < manifest.json
 
 # ---------------------------------------------------------------------
 
 # Create bundle"
-npm run start --  bundle create --enrollment enrollment.json --manifest manifest.json --output bundle.json
+webcat bundle create --enrollment enrollment.json --manifest manifest.json --output bundle.json
 
 jq . < bundle.json
 
-npm run start --  manifest verify bundle.json
+webcat manifest verify bundle.json
 # ---------------------------------------------------------------------
 
 
