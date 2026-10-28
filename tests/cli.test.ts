@@ -328,15 +328,44 @@ describe("manifest configuration", () => {
 
   it("builds manifests with the extension's rules", () => {
     const hash = toBase64Url(createHash("sha256").update("x").digest());
-    const scan = { files: new Map([["/index.html", hash]]), wasm: new Set<string>() };
-    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
-    expect(buildManifest(config, scan).files).toEqual({ "/index.html": hash });
-    expect(() => buildManifest({ ...config, default_fallback: "/missing.html" }, scan)).toThrow("config.default_fallback must name a file in files, '/missing.html' was not found");
+    const scan = { files: new Map([["/index.html", hash], ["/docs/index.html", "D".repeat(42) + "A"], ["/404.html", "E".repeat(42) + "A"]]), wasm: new Set<string>() };
+    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], wasm: [], extra_csp: {} };
+    const built = buildManifest(config, scan);
+    // Directory keys next to each index, the fallback as a hash, and the legacy fields for extensions before 3.2.0.
+    expect(Object.keys(built.files)).toEqual(["/", "/404.html", "/docs/", "/docs/index.html", "/index.html"]);
+    expect(built.files["/"]).toBe(hash);
+    expect(built.fallback_hashes).toEqual([scan.files.get("/404.html")]);
+    expect([built.default_index, built.default_fallback]).toEqual(["index.html", "/404.html"]);
+    // No fallbacks at all: nothing emitted for either generation.
+    const none = buildManifest({ ...config, fallbacks: [] }, scan);
+    expect([none.fallback_hashes, none.default_fallback]).toEqual([undefined, undefined]);
+    expect(() => buildManifest({ ...config, fallbacks: ["/missing.html"] }, scan)).toThrow("config.fallbacks must name scanned files, '/missing.html' was not found");
     expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
-    expect(() => buildManifest({ ...config, default_fallback: "/missing.html", default_csp: "default-src 'self'", extra_csp: { "/a": "csp" } }, scan)).toThrow(
-      /3 problems:\n  - config.default_fallback must name a file in files.*\n  - config.default_csp must be .*\n  - config.extra_csp\['\/a'\] must be/,
+    expect(() => buildManifest({ ...config, fallbacks: ["/missing.html"], default_csp: "default-src 'self'", extra_csp: { "/a": "csp" } }, scan)).toThrow(
+      /3 problems:\n  - config.fallbacks must name scanned files.*\n  - config.default_csp must be .*\n  - config.extra_csp\['\/a'\] must be/,
     );
+  });
+
+  it("reads old and new configs alike and publishes fallbacks under their hash", async () => {
+    const { writeFallbackCopies } = await import("../src/manifest");
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-fallback-"));
+    const base = { app: "https://example.com", version: "1", default_csp: "default-src 'none'" };
+    await writeFile(path.join(dir, "legacy.json"), JSON.stringify({ ...base, default_index: "/index.html", default_fallback: "/404.html" }));
+    await writeFile(path.join(dir, "bare.json"), JSON.stringify(base));
+    await writeFile(path.join(dir, "new.json"), JSON.stringify({ ...base, fallbacks: ["/404.html", "/index.html"] }));
+    expect((await loadManifestConfig(path.join(dir, "legacy.json"))).fallbacks).toEqual(["/404.html"]);
+    expect(await loadManifestConfig(path.join(dir, "bare.json"))).toMatchObject({ default_index: "index.html", fallbacks: ["/index.html"] });
+    expect((await loadManifestConfig(path.join(dir, "new.json"))).fallbacks).toEqual(["/404.html", "/index.html"]);
+
+    await writeFile(path.join(dir, "404.html"), "lost");
+    await writeFile(path.join(dir, "index.html"), "home");
+    const config = await loadManifestConfig(path.join(dir, "legacy.json"));
+    const manifest = buildManifest(config, await scanDirectory(dir, { excludePaths: ["legacy.json", "bare.json", "new.json"] }));
+    const hash = toBase64Url(createHash("sha256").update("lost").digest());
+    expect(await writeFallbackCopies(dir, config, manifest)).toEqual([`/.well-known/webcat/hashes/${hash}`]);
+    expect(await readFile(path.join(dir, ".well-known/webcat/hashes", hash), "utf8")).toBe("lost");
+    await rm(dir, { recursive: true, force: true });
   });
 });
 
@@ -599,7 +628,8 @@ describe("validity", () => {
 
 describe("site checks", () => {
   it("picks the CSP and file hash the extension would for a path", async () => {
-    const { checkHeaders, expectedCsp, expectedHash } = await import("../src/site");
+    const { checkHeaders, expectedCsp, acceptableHashes } = await import("../src/site");
+    const { effectiveManifest } = await import("../src/manifest");
     const manifest = {
       app: "a", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/404.html",
       files: { "/index.html": "A", "/404.html": "B", "/app/main.js": "C" }, wasm: [],
@@ -608,9 +638,14 @@ describe("site checks", () => {
     expect(expectedCsp(manifest, "/")).toBe("default-src 'none'");
     expect(expectedCsp(manifest, "/app/other.js")).toBe("default-src 'none'; script-src 'self'");
     expect(expectedCsp(manifest, "/app/main.js")).toBe("default-src 'none'; script-src 'wasm-unsafe-eval'");
-    expect(expectedHash(manifest, "/", true)).toBe("A");
-    expect(expectedHash(manifest, "/missing.html", true)).toBe("B");
-    expect(expectedHash(manifest, "/missing.js", false)).toBeUndefined();
+    // A legacy manifest and its 3.2.0 form answer the same: the keyed hash, plus the fallback for documents.
+    const modern = { ...manifest, default_index: undefined, default_fallback: undefined, files: { ...manifest.files, "/": "A" }, fallback_hashes: ["B"] };
+    for (const m of [effectiveManifest(manifest), modern]) {
+      expect(acceptableHashes(m, "/", true)).toEqual(["A", "B"]);
+      expect(acceptableHashes(m, "/missing.html", true)).toEqual(["B"]);
+      expect(acceptableHashes(m, "/missing.js", false)).toEqual([]);
+      expect(acceptableHashes(m, "/app/main.js", false)).toEqual(["C"]);
+    }
     const problems = checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src *", refresh: "0", "origin-agent-cluster": "?0" }));
     expect(problems).toHaveLength(4);
     expect(checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src 'none'" }))).toEqual([]);

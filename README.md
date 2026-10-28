@@ -419,8 +419,7 @@ cat > webcat.config.json <<'EOF'
   "app": "https://github.com/element-hq/element-web",
   "version": "1.12.3",
   "default_csp": "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; img-src * blob: data:; connect-src * blob:; font-src 'self' data: ; media-src * blob: data:; child-src blob: data:; worker-src 'self'; frame-src blob: data:; form-action 'self'; manifest-src 'self'; frame-ancestors 'self'",
-  "default_index": "index.html",
-  "default_fallback": "/error.html",
+  "fallbacks": ["/error.html"],
   "wasm": ["8A7Ecx-qI7PnFNAOiNTRDi31wKQn06K0rm41Jv3RTvc"],
   "extra_csp": {}
 }
@@ -473,8 +472,8 @@ or a JSON equivalent) matching the schema below:
 | `app` | string | Origin URL of the application being packaged. |
 | `version` | string | Git tag to be used for reproducibility and auditing. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
-| `default_index` | string | Default index file served when a directory is requested; leading `/` is stripped automatically. |
-| `default_fallback` | string | Absolute path served when a file is missing. |
+| `default_index` | string | Optional, `index.html`. The file a directory path stands for: `/docs/` gets the hash of `/docs/index.html`. |
+| `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `manifest generate`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |
 | `wasm` | string[] | Optional list of base64url SHA-256 digests for inline WebAssembly modules. `.wasm` files are added automatically during generation. |
 | `extra_csp` | Record<string, string> | Optional per-path CSP overrides; keys must start with `/`. | `{}` or `{ "/app": "default-src 'none'" }` |
 

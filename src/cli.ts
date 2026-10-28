@@ -14,6 +14,7 @@ import {
   loadManifestDocument,
   manifestHash,
   scanDirectory,
+  writeFallbackCopies,
 } from "./manifest.js";
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
 import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
@@ -420,6 +421,8 @@ manifest
     const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
     const unserved = Object.keys(document.manifest.files).filter(isHostOnlyFile);
     if (unserved.length) log(`Warning: hosts usually do not serve ${unserved.join(", ")}; exclude with ${unserved.map((p) => `--exclude ${p.slice(1)}`).join(" ")}`);
+    if (!config.fallbacks.length) log("Warning: no fallbacks; extensions before 3.2.0 reject a manifest without default_fallback");
+    for (const written of await writeFallbackCopies(options.directory, config, document.manifest)) log(`wrote ${written}`);
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
 
@@ -598,6 +601,7 @@ program
       process.stdout.write("Trusted root:    WARNING, re-enroll before signing again\n");
       report.trustedRoot.forEach((line) => process.stdout.write(`  - ${line}\n`));
     }
+    report.fallbacks.forEach((line) => process.stdout.write(`Fallbacks:       WARNING, ${line}\n`));
     const failed = report.paths.filter((p) => p.problems.length > 0);
     process.stdout.write(`Paths:           ${report.paths.length} checked, ${failed.length} with problems\n`);
     for (const { path, problems } of failed) {
