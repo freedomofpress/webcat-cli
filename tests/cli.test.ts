@@ -525,6 +525,7 @@ describe("sigstore signing", () => {
     const root = { tlogs: [{ baseUrl: DEFAULT_REKOR_URL, publicKey: { rawBytes: "K1" } }, v2], ctlogs: [{ baseUrl: "https://ctfe" }] };
     expect(withoutRekorV1(root)).toEqual({ tlogs: [v2], ctlogs: root.ctlogs });
     expect(withoutRekorV1({ fulcio: { root: "data" } })).toEqual({ fulcio: { root: "data" } });
+    expect(() => withoutRekorV1({ tlogs: [root.tlogs[0]] })).toThrow("no transparency log other than");
   });
 
   it("defaults Rekor v2 to the public tile log plus TSA, and v1 to legacy Rekor without a TSA", async () => {

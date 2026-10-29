@@ -38,7 +38,13 @@ export const DEFAULT_TSA_URL = "https://timestamp.sigstore.dev";
 export function withoutRekorV1<T extends Record<string, unknown>>(root: T): T {
   if (!Array.isArray(root.tlogs)) return root;
   const tlogs = root.tlogs.filter((tlog) => tlog?.baseUrl !== DEFAULT_REKOR_URL);
+  if (tlogs.length === 0) {
+    throw invalid(`the trusted root has no transparency log other than ${DEFAULT_REKOR_URL} (Rekor v1); nothing could verify. Pass --keep-rekor-v1 or use a root that lists Rekor v2`);
+  }
   if (tlogs.length < root.tlogs.length) log(`Dropped ${DEFAULT_REKOR_URL} (Rekor v1) from the trusted root; sign with Rekor v2`);
+  if (!Array.isArray(root.timestampAuthorities) || root.timestampAuthorities.length === 0) {
+    log("Warning: the trusted root lists no timestamp authority; Rekor v2 entries only verify with a TSA timestamp");
+  }
   return { ...root, tlogs };
 }
 export const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
