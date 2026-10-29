@@ -519,6 +519,14 @@ describe("enrollment chain client", () => {
 });
 
 describe("sigstore signing", () => {
+  it("drops Rekor v1 from a trusted root and leaves everything else alone", async () => {
+    const { DEFAULT_REKOR_URL, DEFAULT_REKOR_V2_URL, withoutRekorV1 } = await import("../src/sigstore");
+    const v2 = { baseUrl: DEFAULT_REKOR_V2_URL, publicKey: { rawBytes: "K2" } };
+    const root = { tlogs: [{ baseUrl: DEFAULT_REKOR_URL, publicKey: { rawBytes: "K1" } }, v2], ctlogs: [{ baseUrl: "https://ctfe" }] };
+    expect(withoutRekorV1(root)).toEqual({ tlogs: [v2], ctlogs: root.ctlogs });
+    expect(withoutRekorV1({ fulcio: { root: "data" } })).toEqual({ fulcio: { root: "data" } });
+  });
+
   it("defaults Rekor v2 to the public tile log plus TSA, and v1 to legacy Rekor without a TSA", async () => {
     const { DEFAULT_REKOR_URL, DEFAULT_REKOR_V2_URL, DEFAULT_TSA_URL, sigstoreEndpoints } = await import("../src/sigstore");
     expect(sigstoreEndpoints({ rekorApiVersion: 2 })).toEqual({ rekorUrl: DEFAULT_REKOR_V2_URL, tsaUrl: DEFAULT_TSA_URL });

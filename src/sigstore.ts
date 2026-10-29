@@ -32,6 +32,15 @@ import { causeOf, ensureObject, external, invalid, log, sha256 } from "./utils.j
 export { DEFAULT_FULCIO_URL, DEFAULT_REKOR_URL };
 export const DEFAULT_REKOR_V2_URL = "https://log2025-1.rekor.sigstore.dev";
 export const DEFAULT_TSA_URL = "https://timestamp.sigstore.dev";
+
+// Rekor v1 is distrusted: a trusted root the CLI pins for an enrollment has the legacy log removed, so verifiers skip
+// its entries and only a Rekor v2 entry (with a TSA timestamp) satisfies the log threshold.
+export function withoutRekorV1<T extends Record<string, unknown>>(root: T): T {
+  if (!Array.isArray(root.tlogs)) return root;
+  const tlogs = root.tlogs.filter((tlog) => tlog?.baseUrl !== DEFAULT_REKOR_URL);
+  if (tlogs.length < root.tlogs.length) log(`Dropped ${DEFAULT_REKOR_URL} (Rekor v1) from the trusted root; sign with Rekor v2`);
+  return { ...root, tlogs };
+}
 export const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
 export const SIGSTORE_OIDC_CLIENT_ID = "sigstore";
 export const SIGSTORE_OIDC_SCOPE = "openid email";

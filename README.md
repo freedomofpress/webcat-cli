@@ -132,7 +132,9 @@ By default, these binaries will be available in `$HOME/go/bin`.
 The `enrollment` namespace manages Sigsum or Sigstore enrollment payloads. Sigsum enrollments
 are the default; use `--type sigstore` along with Sigstore claim constraints (`--claim`
 and/or compatibility flags `--issuer` + `--identity`) and either `--trusted-root` or
-`--community-trusted-root` to build Sigstore enrollments.
+`--community-trusted-root` to build Sigstore enrollments. Either way the legacy Rekor v1 log
+(`rekor.sigstore.dev`) is removed from the pinned trusted root: manifests signed for such an
+enrollment must be logged to Rekor v2, and a Rekor v1 entry alone does not verify.
 
 | Command | Purpose |
 | --- | --- |
@@ -227,7 +229,9 @@ Sigstore signing defaults to the community Fulcio, Rekor v2 (`log2025-1.rekor.si
 and timestamp authority (`timestamp.sigstore.dev`) services. Rekor v2 entries carry no
 integrated time, so a TSA timestamp is always requested with them. You can override the
 endpoints with `--fulcio-url`, `--rekor-url`, and `--tsa-url`, or pass `--rekor-api-version 1`
-to log to the legacy `rekor.sigstore.dev` instead (no TSA unless `--tsa-url` is given).
+to log to the legacy `rekor.sigstore.dev` instead (no TSA unless `--tsa-url` is given). Rekor v1
+is only useful with a hand-made trusted root that still lists it; enrollments created by
+`enrollment create` do not trust it.
 
 To sign with Sigstore using an ambient OIDC token (for example, in CI):
 

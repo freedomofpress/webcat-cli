@@ -43,6 +43,7 @@ import {
   fetchInteractiveOidcToken,
   signManifestWithSigstore,
   staticIdentityProvider,
+  withoutRekorV1,
   verifySigstoreManifest,
 } from "./sigstore.js";
 import { CliError, OID_RE, ensureObject, external, hashPolicyBytes, invalid, log, readJson, readText, sha256, toBase64Url, writeOutput } from "./utils.js";
@@ -142,9 +143,11 @@ enrollmentCreate.action(async (options) => {
     if (Object.keys(claims).length === 0) {
       throw invalid("--identity, --issuer or --claim is required for sigstore enrollments");
     }
-    const trustedRoot = options.communityTrustedRoot
-      ? await fetchCommunityTrustedRoot()
-      : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`);
+    const trustedRoot = withoutRekorV1(
+      options.communityTrustedRoot
+        ? await fetchCommunityTrustedRoot()
+        : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`),
+    );
     enrollmentObject = buildEnrollmentObject({
       type: "sigstore",
       trustedRoot,
