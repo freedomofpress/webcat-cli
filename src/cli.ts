@@ -51,6 +51,7 @@ import {
   signingBlockedBy,
   staticIdentityProvider,
   trustedRootDrift,
+  withoutRekorV1,
 } from "./sigstore.js";
 import {
   CliError,
@@ -267,9 +268,11 @@ enrollmentCreate.action(async (options) => {
       },
       () => requireOption(options.maxAge, "--max-age", "sigstore enrollments"),
     ]);
-    const trustedRoot = options.communityTrustedRoot
-      ? await fetchCommunityTrustedRoot()
-      : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`);
+    const trustedRoot = withoutRekorV1(
+      options.communityTrustedRoot
+        ? await fetchCommunityTrustedRoot()
+        : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`),
+    );
     enrollmentObject = await buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
