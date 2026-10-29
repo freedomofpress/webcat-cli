@@ -214,6 +214,7 @@ const enrollmentCreate = enrollment
   .addOption(new Option("-c, --cas-url <url>", "CAS https URL").helpGroup(SIGSUM))
   .addOption(new Option("--trusted-root <path>", "Sigstore trusted root file").helpGroup(SIGSTORE))
   .addOption(new Option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF").helpGroup(SIGSTORE))
+  .addOption(new Option("--keep-rekor-v1", `Keep ${DEFAULT_REKOR_URL} (Rekor v1) in the trusted root instead of distrusting it`).helpGroup(SIGSTORE))
   .addOption(new Option("--identity <value>", `Signing identity (SAN, OID ${SAN_OID})`).helpGroup(SIGSTORE))
   .addOption(new Option("--issuer <value>", `OIDC issuer (OID ${ISSUER_V2_OID})`).helpGroup(SIGSTORE))
   .addOption(
@@ -268,11 +269,10 @@ enrollmentCreate.action(async (options) => {
       },
       () => requireOption(options.maxAge, "--max-age", "sigstore enrollments"),
     ]);
-    const trustedRoot = withoutRekorV1(
-      options.communityTrustedRoot
-        ? await fetchCommunityTrustedRoot()
-        : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`),
-    );
+    const root = options.communityTrustedRoot
+      ? await fetchCommunityTrustedRoot()
+      : ensureObject(await readJson(options.trustedRoot, "trusted root"), `trusted root from ${options.trustedRoot}`);
+    const trustedRoot = options.keepRekorV1 ? root : withoutRekorV1(root);
     enrollmentObject = await buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
