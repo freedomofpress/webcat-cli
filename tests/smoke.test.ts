@@ -37,10 +37,13 @@ describe("command line", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-smoke-"));
     await writeFile(path.join(dir, "index.html"), "<h1>hi</h1>");
     const config = path.join(await mkdtemp(path.join(tmpdir(), "webcat-smoke-cfg-")), "webcat.config.json"); // outside the scanned dir
-    await writeFile(config, JSON.stringify({ app: "https://example.org", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html" }));
+    await writeFile(config, JSON.stringify({ app: "https://example.org", version: "1.0.0", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html" }));
     const { stdout, code } = webcat("manifest", "generate", "--type", "sigstore", "-c", config, "-d", dir);
     expect(code).toBe(0);
-    expect(Object.keys(JSON.parse(stdout).manifest.files)).toEqual(["/index.html"]);
+    const manifest = JSON.parse(stdout).manifest;
+    expect(Object.keys(manifest.files)).toEqual(["/", "/index.html"]);
+    expect(manifest.manifest_schema).toBe(1);
+    expect(manifest.fallback_hashes).toEqual([manifest.files["/index.html"]]);
   });
 
   it("reports every missing flag at once with exit 2", () => {

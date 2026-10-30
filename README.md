@@ -189,11 +189,17 @@ rewrites a hash-named file:
 | `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o` |
 | `bundle.json`, `manifest.sigsum.<checksum>.json` or `manifest.sigstore.<hash>.json` | `bundle create` |
 | `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle |
+| `hashes/<hash>` | `bundle create`, one per `fallback_hashes` entry, copied from the built site (`--directory`, or `directory` in the config) |
 
 Every command that writes there stages the files in git when run inside a repository, and
 `bundle create --commit` commits them. `--no-git` opts out. `history check [ref]` verifies that
-every hash-named file hashes to its name, that the current pointers match them, and that nothing
-was modified or deleted since `ref`; run it in CI with `origin/main` as the ref.
+every hash-named file hashes to its name, that the current pointers match them, that every
+fallback the manifest lists is under `hashes/`, and that nothing was modified or deleted since
+`ref`; run it in CI with `origin/main` as the ref.
+
+Hashes follow the spec's canonical JSON rule: documents with `enrollment_schema` or
+`manifest_schema` are hashed over RFC 8785 (JCS); documents without the field predate it and
+keep their OLPC canonical JSON hash, which is what the chain and the logs recorded.
 
 When `webcat.config.json` sets `source`, the manifest claims the files build from that
 repository at tag `version`: `manifest generate` requires HEAD to be that tag and `manifest sign`
@@ -389,9 +395,10 @@ Errors are printed to stderr as `Error: <message>`. Messages name the CLI flag (
 ## Bundle helpers
 
 `bundle create` publishes a signed manifest into the well-known directory: it writes `bundle.json`
-and the hash-named manifest file, keeps the previous bundle as `bundle-prev.json` when the
-enrollment changed, and stages (or with `--commit`, commits) the files. With `-o` it only writes
-the bundle to that path, for example to inspect one:
+and the hash-named manifest file, copies each fallback document the manifest lists to
+`hashes/<hash>` (from `--directory`, or `directory` in the config), keeps the previous bundle as
+`bundle-prev.json` when the enrollment changed, and stages (or with `--commit`, commits) the
+files. With `-o` it only writes the bundle to that path, for example to inspect one:
 
 ```sh
 npx webcat bundle create --commit
@@ -478,10 +485,10 @@ or a JSON equivalent) matching the schema below:
 | `source` | string, optional | Git repository the site is built from; `version` must be a tag there. Auditors rebuild from it. |
 | `artifact` | string, optional | Release archive URL template containing `${version}`; must serve a gzip tar of the web root. |
 | `app` | string, deprecated | Replaced by `source`; accepted with a warning and ignored by the extension. |
-| `version` | string | Git tag to be used for reproducibility and auditing. |
+| `version` | string | A semantic version such as `1.4.0`, the git tag to be used for reproducibility and auditing. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
-| `default_index` | string | Default index file served when a directory is requested; leading `/` is stripped automatically. |
-| `default_fallback` | string | Absolute path served when a file is missing. |
+| `default_index` | string | Index file of each directory; leading `/` is stripped automatically. The manifest lists every directory containing one under its path (`/`, `/docs/`) with that file's hash. |
+| `default_fallback` | string | Absolute path of the document served for missing pages. The manifest lists its hash in `fallback_hashes`, and `bundle create` publishes it under `hashes/<hash>`. |
 | `directory` | string, optional | Where the built site lives; used by `release`. Never part of the manifest. |
 | `wasm` | string[] | Optional list of base64url SHA-256 digests for inline WebAssembly modules. `.wasm` files are added automatically during generation. |
 | `extra_csp` | Record<string, string> | Optional per-path CSP overrides; keys must start with `/`. | `{}` or `{ "/app": "default-src 'none'" }` |

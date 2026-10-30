@@ -96,6 +96,8 @@ describe("enrollment helpers", () => {
     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
     expect(enrollment.threshold).toBe(1);
     expect(enrollment.max_age).toBe(1_000_000);
+    expect(enrollment.enrollment_schema).toBe(1);
+    expect(Object.keys(enrollment)).not.toContain("cas_url");
   });
 
   it("rejects duplicate or insufficient signer information", async () => {
@@ -159,6 +161,7 @@ describe("enrollment helpers", () => {
 
     expect(enrollment).toEqual({
       type: "sigstore",
+      enrollment_schema: 1,
       trusted_root: trustedRoot,
       claims: {
         "2.5.29.17": "identity@example.com",
@@ -284,13 +287,20 @@ describe("manifest configuration", () => {
   it("builds manifests with the extension's rules", () => {
     const hash = toBase64Url(createHash("sha256").update("x").digest());
     const scan = { files: new Map([["/index.html", hash]]), wasm: new Set<string>() };
-    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
-    expect(buildManifest(config, scan).files).toEqual({ "/index.html": hash });
-    expect(() => buildManifest({ ...config, default_fallback: "/missing.html" }, scan)).toThrow("config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE");
+    const config = { app: "https://example.com", version: "1.0.0", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html", wasm: [], extra_csp: {} };
+    // Schema 1: the directory gets its index's hash, the fallback is listed by hash, the deprecated fields stay out.
+    const built = buildManifest(config, scan);
+    expect(built.files).toEqual({ "/": hash, "/index.html": hash });
+    expect(built.fallback_hashes).toEqual([hash]);
+    expect(built.manifest_schema).toBe(1);
+    expect(Object.keys(built)).not.toContain("app");
+    expect(Object.keys(built)).not.toContain("default_index");
+    expect(() => buildManifest({ ...config, version: "1" }, scan)).toThrow("config.version must be a semantic version");
+    expect(() => buildManifest({ ...config, default_fallback: "/missing.html" }, scan)).toThrow("config.default_fallback /missing.html is not a file in the directory");
     expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, default_fallback: "/missing.html", default_csp: "default-src 'self'", extra_csp: { "/a": "csp" } }, scan)).toThrow(
-      /3 problems:\n  - config: ERR_WEBCAT_MANIFEST_DEFAULT_FALLBACK_MISSING_FILE\n  - config.default_csp must be .*\n  - config.extra_csp\['\/a'\] must be/,
+      /3 problems:\n  - config.default_fallback \/missing.html is not a file in the directory\n  - config.default_csp must be .*\n  - config.extra_csp\['\/a'\] must be/,
     );
   });
 });
@@ -520,6 +530,21 @@ describe("history", () => {
     const written = await publishBundle(dir, enrollment, document);
     expect(written.map((f) => path.basename(f)).sort()).toEqual([manifestFileName(enrollment, document), "bundle.json"].sort());
     expect(await checkHistory(dir)).toEqual([]);
+    // A schema 1 manifest lists its fallback by hash; the document is copied from the site into hashes/<hash>.
+    const site = await mkdtemp(path.join(tmpdir(), "webcat-site-"));
+    await writeFile(path.join(site, "404.html"), "<h1>not found</h1>");
+    const fallbackHash = toBase64Url(createHash("sha256").update("<h1>not found</h1>").digest());
+    const { app: _app, default_index: _index, default_fallback: _fallback, ...rest } = bundle.manifest;
+    const versioned = { manifest: { ...rest, manifest_schema: 1, version: "1.0.0", fallback_hashes: [fallbackHash] }, signatures: bundle.signatures };
+    await expect(publishBundle(dir, enrollment, versioned)).resolves.not.toContain(expect.stringContaining("hashes/"));
+    expect(await checkHistory(dir)).toEqual([expect.stringContaining(`lists fallback ${fallbackHash} but hashes/${fallbackHash} is missing`)]);
+    const withFallback = await publishBundle(dir, enrollment, versioned, site);
+    expect(withFallback.map((f) => path.relative(dir, f))).toContain(path.join("hashes", fallbackHash));
+    expect(await checkHistory(dir)).toEqual([]);
+    await writeFile(path.join(dir, "hashes", fallbackHash), "tampered");
+    expect(await checkHistory(dir)).toEqual([expect.stringMatching(/^hashes\/.*: content hashes to .* not to its name$/)]);
+    await rm(path.join(dir, "hashes"), { recursive: true, force: true });
+    await publishBundle(dir, enrollment, document);
     expect(await writeOnce(dir, enrollmentFileName(enrollment), "different\n").catch((e) => e.message)).toContain("must not change");
     git("add", "."); git("commit", "-q", "-m", "first");
     // A new enrollment: the old bundle becomes bundle-prev.json; the old hash files stay.
@@ -539,6 +564,16 @@ describe("history", () => {
   });
 });
 
+describe("canonical form", () => {
+  it("hashes versioned documents under JCS and legacy ones under OLPC", async () => {
+    const { canonicalForm } = await import("../src/utils");
+    const legacy = { timestamp: "tree_size 1\nroot_hash aa" };
+    expect(canonicalForm(legacy)).toBe('{"timestamp":"tree_size 1\nroot_hash aa"}');
+    expect(canonicalForm({ ...legacy, manifest_schema: 1 })).toBe('{"manifest_schema":1,"timestamp":"tree_size 1\\nroot_hash aa"}');
+    expect(canonicalForm({ ...legacy, enrollment_schema: 1 })).toContain("\\n");
+  });
+});
+
 describe("validity", () => {
   it("warns when a manifest expires within 30 days", async () => {
     const { describeValidity } = await import("../src/bundle");
@@ -550,7 +585,7 @@ describe("validity", () => {
 
 describe("site checks", () => {
   it("picks the CSP and file hash the extension would for a path", async () => {
-    const { checkHeaders, expectedCsp, expectedHash } = await import("../src/site");
+    const { checkHeaders, expectedCsp, expectedHashes } = await import("../src/site");
     const manifest = {
       app: "a", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/404.html",
       files: { "/index.html": "A", "/404.html": "B", "/app/main.js": "C" }, wasm: [],
@@ -559,9 +594,13 @@ describe("site checks", () => {
     expect(expectedCsp(manifest, "/")).toBe("default-src 'none'");
     expect(expectedCsp(manifest, "/app/other.js")).toBe("default-src 'none'; script-src 'self'");
     expect(expectedCsp(manifest, "/app/main.js")).toBe("default-src 'none'; script-src 'wasm-unsafe-eval'");
-    expect(expectedHash(manifest, "/", true)).toBe("A");
-    expect(expectedHash(manifest, "/missing.html", true)).toBe("B");
-    expect(expectedHash(manifest, "/missing.js", false)).toBeUndefined();
+    // A legacy manifest is read the way the extension rewrites it: "/" from default_index, the fallback by hash.
+    expect(expectedHashes(manifest, "/", true)).toEqual(["A"]);
+    expect(expectedHashes(manifest, "/missing.html", true)).toEqual(["B"]);
+    expect(expectedHashes(manifest, "/missing.js", false)).toEqual([]);
+    const versioned = { ...manifest, manifest_schema: 1 as const, app: undefined, default_index: undefined, default_fallback: undefined, files: { ...manifest.files, "/": "A" }, fallback_hashes: ["B", "D"] };
+    expect(expectedHashes(versioned, "/", true)).toEqual(["A"]);
+    expect(expectedHashes(versioned, "/missing.html", true)).toEqual(["B", "D"]);
     const problems = checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src *", refresh: "0", "origin-agent-cluster": "?0" }));
     expect(problems).toHaveLength(4);
     expect(checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src 'none'" }))).toEqual([]);

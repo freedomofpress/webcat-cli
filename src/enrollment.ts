@@ -1,9 +1,9 @@
 import { EnrollmentTypes, type SigsumEnrollment as LibrarySigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
-import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
 import { parseCompiledPolicy } from "@freedomofpress/sigsum/dist/compiledPolicy.js";
 import {
   OID_RE,
+  canonicalForm,
   causeOf,
   check,
   decodeKeyMaterial,
@@ -29,8 +29,9 @@ function compiledPolicyLogs(policy: unknown): string[] | Error {
   }
 }
 
-// cas_url is gone from the spec (auditing lives in the well-known directory); old enrollments may still carry it.
-export type SigsumEnrollment = Omit<LibrarySigsumEnrollment, "cas_url"> & { cas_url?: string };
+// cas_url is gone from the spec (auditing lives in the well-known directory); enrollments without
+// enrollment_schema may still carry it, and the extension's type says so.
+export type SigsumEnrollment = LibrarySigsumEnrollment;
 export type Enrollment = SigsumEnrollment | SigstoreEnrollment;
 export { EnrollmentTypes, type SigstoreEnrollment };
 
@@ -58,10 +59,13 @@ export async function buildEnrollmentObject(
 ): Promise<Enrollment> {
   const max_age = parseInteger(o.maxAge, "--max-age");
   if (o.type === "sigstore") {
-    return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
+    return parseEnrollmentObject({ type: "sigstore", enrollment_schema: 1, trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
   }
   const signers = await Promise.all(o.signers.map(signerFromValue));
-  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, logs: o.logs }, { authoring: true });
+  return parseEnrollmentObject(
+    { type: "sigsum", enrollment_schema: 1, policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, logs: o.logs },
+    { authoring: true },
+  );
 }
 
 // The extension's validators decide what an enrollment is; that is all that is checked on anything read from disk or
@@ -72,11 +76,7 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
   if (e.type !== EnrollmentTypes.Sigsum && e.type !== EnrollmentTypes.Sigstore) {
     throw invalid("enrollment.type must be 'sigsum' or 'sigstore'; browsers reject enrollments without it");
   }
-  const encodable = () => {
-    if (canonicalize(e) === null) {
-      throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
-    }
-  };
+  const encodable = () => canonicalizeEnrollment(e as unknown as Enrollment);
   if (e.type === EnrollmentTypes.Sigstore) {
     const enrollment = e as unknown as SigstoreEnrollment;
     validateAll([
@@ -139,13 +139,13 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
   return enrollment;
 }
 
-// Same canonical form the oracles and the extension hash.
+// Same canonical form the oracles and the extension hash (spec server.md section 1.0).
 export function canonicalizeEnrollment(enrollment: Enrollment): string {
-  const canonical = canonicalize(enrollment);
-  if (canonical === null) {
-    throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
+  try {
+    return canonicalForm(enrollment);
+  } catch (err) {
+    throw invalid(`enrollment must contain only strings, integers, booleans, null, arrays and objects: ${causeOf(err)}`);
   }
-  return canonical;
 }
 
 export const loadEnrollment = async (path: string): Promise<Enrollment> => parseEnrollmentObject(await readJson(path, "enrollment"));

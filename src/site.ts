@@ -5,12 +5,11 @@ import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type BundleDocument, describeValidity, parseBundleObject, verifyBundle } from "./bundle.js";
 import { bareDomain, enrollmentHashHex, fetchDomainStatus, fetchServedEnrollment } from "./chain.js";
-import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
 import { EnrollmentTypes, parseEnrollmentObject } from "./enrollment.js";
 import { WELL_KNOWN_DIR, enrollmentFileName, enrollmentHash, manifestFileName } from "./history.js";
-import type { ManifestContent } from "./manifest.js";
+import { type ManifestContent, normalizeManifest } from "./manifest.js";
 import { fetchCommunityTrustedRoot, trustedRootDrift } from "./sigstore.js";
-import { causeOf, describeWebcatError, external, sha256, toBase64Url } from "./utils.js";
+import { canonicalForm, causeOf, describeWebcatError, external, sha256, toBase64Url } from "./utils.js";
 
 export interface PathCheck {
   path: string;
@@ -30,24 +29,21 @@ const FORBIDDEN_HEADERS = ["refresh", "link"];
 
 // Mirrors the extension's verifyCSP: exact extra_csp key, else the longest matching prefix, else the default.
 export function expectedCsp(manifest: ManifestContent, pathname: string): string {
-  const effectivePath = pathname === "/" ? manifest.default_index : pathname;
   const extra = manifest.extra_csp ?? {};
-  if (extra[effectivePath]) {
-    return extra[effectivePath];
+  if (extra[pathname]) {
+    return extra[pathname];
   }
   const best = Object.keys(extra)
-    .filter((prefix) => effectivePath.startsWith(prefix))
+    .filter((prefix) => pathname.startsWith(prefix))
     .sort((a, b) => b.length - a.length)[0];
   return best ? extra[best] : manifest.default_csp;
 }
 
-// Mirrors the extension's file lookup: the path itself, a directory's default index, or (documents only) the fallback.
-export function expectedHash(manifest: ManifestContent, pathname: string, isDocument: boolean): string | undefined {
-  return (
-    manifest.files[pathname] ??
-    (pathname.endsWith("/") ? manifest.files[pathname + manifest.default_index] : undefined) ??
-    (isDocument ? manifest.files[manifest.default_fallback] : undefined)
-  );
+// Mirrors the extension's file lookup: the path itself, or (documents only) any of the fallbacks.
+export function expectedHashes(manifest: ManifestContent, pathname: string, isDocument: boolean): string[] {
+  const normalized = normalizeManifest(manifest);
+  const own = normalized.files[pathname];
+  return own !== undefined ? [own] : isDocument ? (normalized.fallback_hashes ?? []) : [];
 }
 
 export function checkHeaders(manifest: ManifestContent, pathname: string, headers: Headers): string[] {
@@ -115,13 +111,13 @@ async function checkPath(origin: string, manifest: ManifestContent, pathname: st
   if (response.status !== 200) {
     problems.push(`HTTP ${response.status}`);
   }
-  const expected = expectedHash(manifest, pathname, isDocument);
-  if (!expected) {
+  const expected = expectedHashes(manifest, pathname, isDocument);
+  if (expected.length === 0) {
     problems.push("not in manifest.files, the extension would deny it");
   } else {
     const served = toBase64Url(sha256(new Uint8Array(await response.arrayBuffer())));
-    if (served !== expected) {
-      problems.push(`content hash does not match the manifest: served ${served}, manifest ${expected}`);
+    if (!expected.includes(served)) {
+      problems.push(`content hash does not match the manifest: served ${served}, manifest ${expected.join(" or ")}`);
     }
   }
   return { path: pathname, problems };
@@ -196,11 +192,15 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
   const enrollment = `bundle embeds ${bundleHash}; ${servedPart}; ${chainPart}`;
   // The history auditors read: hash-named files for the enrollment(s) in play and for the served manifest.
   const history: string[] = [];
-  const expectHistoryFile = async (name: string, why: string, matches: (text: string) => boolean) => {
+  const expectHistoryFile = async (name: string, why: string, matches: (text: string, bytes: Uint8Array) => boolean) => {
     const url = `${origin}/${WELL_KNOWN_DIR}/${name}`;
     const response = await fetch(url).catch(() => null);
-    if (!response?.ok) history.push(`${name} is not served (${why})`);
-    else if (!matches(await response.text())) history.push(`${name} does not match its name (${why})`);
+    if (!response?.ok) {
+      history.push(`${name} is not served (${why})`);
+      return;
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!matches(new TextDecoder().decode(bytes), bytes)) history.push(`${name} does not match its name (${why})`);
   };
   const hashesTo = (hash: string) => (text: string) => {
     try {
@@ -213,16 +213,20 @@ export async function checkSite(domain: string, options: { chainApi: string; pat
   if (!(status instanceof Error) && status.canonical && status.canonical !== bundleHash) {
     await expectHistoryFile(`enrollment.${status.canonical}.json`, "the enrollment the chain records", hashesTo(status.canonical));
   }
-  const servedManifest = canonicalize({ manifest: current.bundle.manifest.manifest, signatures: current.bundle.manifest.signatures ?? {} });
+  const servedManifest = canonicalForm({ manifest: current.bundle.manifest.manifest, signatures: current.bundle.manifest.signatures ?? {} });
   await expectHistoryFile(manifestFileName(current.bundle.enrollment, current.bundle.manifest), "the manifest in bundle.json", (text) => {
     try {
       const parsed = JSON.parse(text);
-      return canonicalize({ manifest: parsed.manifest, signatures: parsed.signatures ?? {} }) === servedManifest;
+      return canonicalForm({ manifest: parsed.manifest, signatures: parsed.signatures ?? {} }) === servedManifest;
     } catch {
       return false;
     }
   });
   const manifest = current.bundle.manifest.manifest;
+  // Each fallback document is served under its hash (spec manifest.md), so auditors can find what the manifest accepts.
+  for (const hash of manifest.fallback_hashes ?? []) {
+    await expectHistoryFile(`hashes/${hash}`, "a fallback document of the manifest", (_, bytes) => toBase64Url(sha256(bytes)) === hash);
+  }
   const paths = options.paths?.length ? options.paths : ["/", ...Object.keys(manifest.files)];
   const trustedRoot =
     current.bundle.enrollment.type === EnrollmentTypes.Sigstore ? trustedRootDrift(current.bundle.enrollment.trusted_root, await fetchCommunityTrustedRoot()) : [];

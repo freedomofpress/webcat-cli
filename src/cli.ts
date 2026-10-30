@@ -656,6 +656,7 @@ program
   .option("-e, --enrollment <path>", "Enrollment JSON file", `${WELL_KNOWN_DIR}/enrollment.json`)
   .option("-m, --manifest <path>", "Signed manifest JSON file", "manifest.signed.json")
   .option("-d, --dir <path>", "Well-known directory to publish into", WELL_KNOWN_DIR)
+  .option("--directory <path>", "Built site directory, to publish the manifest's fallback documents under hashes/ (default: config.directory in webcat.config.json)")
   .option("--commit", "Commit the written files")
   .option("--no-git", "Do not stage the written files in git")
   .option("-o, --output <path>", "Only write the bundle to this file (no history files)")
@@ -665,7 +666,8 @@ program
       await writeOutput(options.output, JSON.stringify({ enrollment, manifest: document.manifest, signatures: document.signatures }, null, 2));
       return;
     }
-    const written = await publishBundle(options.dir, enrollment, document);
+    const siteDirectory: string | undefined = options.directory ?? (await loadManifestConfig("webcat.config.json").then((c) => c.directory, () => undefined));
+    const written = await publishBundle(options.dir, enrollment, document, siteDirectory);
     written.forEach((f) => log(`wrote ${f}`));
     await stageInGit(written, options.git, options.commit ? `webcat: publish manifest ${document.manifest.version}` : undefined);
   });
@@ -716,7 +718,7 @@ program
       const auth = options.oidcToken ? ["--oidc-token", options.oidcToken] : options.interactive ? ["--interactive"] : [];
       await run("manifest", "sign", "--type", "sigstore", "-i", unsigned, ...auth, "-o", signed, ...skip);
     }
-    await run("bundle", "create", "-m", signed, ...(options.commit ? ["--commit"] : []));
+    await run("bundle", "create", "-m", signed, "--directory", directory, ...(options.commit ? ["--commit"] : []));
     await rm(work, { recursive: true, force: true });
     log(`Released ${version ?? "(unversioned)"}. Left to do: push the commit and tag${archive ? `, upload ${archive} where ${config.artifact} resolves` : ""}, deploy with ${WELL_KNOWN_DIR}/ in the web root`);
   });

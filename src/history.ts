@@ -4,11 +4,13 @@ import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { type Enrollment, EnrollmentTypes, canonicalizeEnrollment, parseEnrollmentObject } from "./enrollment.js";
 import { gitChangedSince } from "./git.js";
-import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentObject } from "./manifest.js";
-import { invalid, log, sha256 } from "./utils.js";
+import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentObject, scanDirectory } from "./manifest.js";
+import { invalid, log, sha256, toBase64Url } from "./utils.js";
 
 export const WELL_KNOWN_DIR = ".well-known/webcat";
 const HASH_FILE = /^(enrollment|manifest\.sigsum|manifest\.sigstore)\.([0-9a-f]{64})\.json$/;
+// Each fallback document of a manifest, under its base64url hash (spec manifest.md fallback_hashes).
+export const HASHES_DIR = "hashes";
 
 export const enrollmentHash = (enrollment: Enrollment): string => sha256(canonicalizeEnrollment(enrollment)).toString("hex");
 export const enrollmentFileName = (enrollment: Enrollment): string => `enrollment.${enrollmentHash(enrollment)}.json`;
@@ -47,9 +49,29 @@ export async function publishEnrollment(dir: string, enrollment: Enrollment): Pr
   return written;
 }
 
-// bundle.json plus the hash-named manifest file; the previous bundle becomes bundle-prev.json when the enrollment changed.
-export async function publishBundle(dir: string, enrollment: Enrollment, document: ManifestDocument): Promise<string[]> {
+// The fallback documents listed in the manifest, copied from the built site into hashes/<hash>. Without the site
+// directory they cannot be found, and the operator is told what to publish.
+export async function publishFallbacks(dir: string, document: ManifestDocument, siteDirectory?: string): Promise<string[]> {
+  const hashes = document.manifest.fallback_hashes ?? [];
+  if (hashes.length === 0) return [];
+  if (siteDirectory === undefined) {
+    log(`Warning: publish each fallback document at ${WELL_KNOWN_DIR}/${HASHES_DIR}/<hash> (${hashes.join(", ")}); pass --directory to do it here`);
+    return [];
+  }
+  const scan = await scanDirectory(siteDirectory, { includeDotfiles: true });
   const written: string[] = [];
+  for (const hash of hashes) {
+    const found = [...scan.files].find(([, h]) => h === hash)?.[0];
+    if (found === undefined) throw invalid(`fallback ${hash} of the manifest is not a file in ${siteDirectory}`);
+    const content = await readFile(path.join(siteDirectory, found), "utf8");
+    if (await writeOnce(path.join(dir, HASHES_DIR), hash, content)) written.push(path.join(dir, HASHES_DIR, hash));
+  }
+  return written;
+}
+
+// bundle.json plus the hash-named manifest file; the previous bundle becomes bundle-prev.json when the enrollment changed.
+export async function publishBundle(dir: string, enrollment: Enrollment, document: ManifestDocument, siteDirectory?: string): Promise<string[]> {
+  const written: string[] = await publishFallbacks(dir, document, siteDirectory);
   const bundle = { enrollment, manifest: document.manifest, signatures: document.signatures };
   const manifestName = manifestFileName(enrollment, document);
   if (await writeOnce(dir, manifestName, pretty({ manifest: document.manifest, signatures: document.signatures }))) written.push(path.join(dir, manifestName));
@@ -76,6 +98,11 @@ export async function checkHistory(dir: string, ref?: string): Promise<string[]>
   const names = await readdir(dir).catch(() => null);
   if (names === null) {
     return [`${dir} does not exist`];
+  }
+  // hashes/<hash>: the content must hash to the name.
+  for (const name of await readdir(path.join(dir, HASHES_DIR)).catch(() => [] as string[])) {
+    const actual = toBase64Url(sha256(await readFile(path.join(dir, HASHES_DIR, name))));
+    if (actual !== name) problems.push(`${HASHES_DIR}/${name}: content hashes to ${actual}, not to its name`);
   }
   for (const name of names) {
     const m = HASH_FILE.exec(name);
@@ -110,6 +137,10 @@ export async function checkHistory(dir: string, ref?: string): Promise<string[]>
         const stored = await readFile(path.join(dir, expected), "utf8").catch(() => null);
         if (stored === null) problems.push(`${pointer}: its manifest has no ${expected}`);
         else if (stored !== pretty({ manifest: parsed.manifest, signatures: parsed.signatures })) problems.push(`${pointer}: ${expected} differs from the manifest and signatures in the bundle`);
+        for (const hash of document.manifest.fallback_hashes ?? []) {
+          const served = await readFile(path.join(dir, HASHES_DIR, hash)).catch(() => null);
+          if (served === null) problems.push(`${pointer}: its manifest lists fallback ${hash} but ${HASHES_DIR}/${hash} is missing`);
+        }
       }
     } catch (err) {
       problems.push(`${pointer}: ${err instanceof Error ? err.message : err}`);
