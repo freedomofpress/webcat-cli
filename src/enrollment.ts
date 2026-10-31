@@ -1,9 +1,9 @@
 import { EnrollmentTypes, type SigsumEnrollment as LibrarySigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
 import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
 import { parseCompiledPolicy } from "@freedomofpress/sigsum/dist/compiledPolicy.js";
+import { canonicalizeJCS } from "@freedomofpress/crypto-browser";
 import {
   OID_RE,
-  canonicalForm,
   causeOf,
   check,
   decodeKeyMaterial,
@@ -139,10 +139,10 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
   return enrollment;
 }
 
-// Same canonical form the oracles and the extension hash (spec server.md section 1.0).
+// Enrollments hash under RFC 8785 whatever their version, as the extension and the oracles do (spec server.md section 1.0).
 export function canonicalizeEnrollment(enrollment: Enrollment): string {
   try {
-    return canonicalForm(enrollment);
+    return canonicalizeJCS(enrollment);
   } catch (err) {
     throw invalid(`enrollment must contain only strings, integers, booleans, null, arrays and objects: ${causeOf(err)}`);
   }

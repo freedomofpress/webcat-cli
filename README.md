@@ -85,26 +85,8 @@ npx webcat init --type sigstore \
   --issuer https://token.actions.githubusercontent.com
 ```
 
-Then have that workflow call the CLI directly. The `id-token` permission is what lets the job
-obtain a Sigstore certificate for its identity:
-
-```yaml
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci && npm run build                      # produces dist/
-      - run: npx @freedomofpress/webcat-cli release --type sigstore   # generate + sign + bundle create --commit, for the tag at HEAD
-      - run: cp -r .well-known dist/                                   # the whole directory is the site's history
-      # deploy dist/ as usual, then push the commit so the history stays in the repository
-```
+Then have that workflow call the CLI directly; see [Releasing from CI](#releasing-from-ci) for
+the job.
 
 `manifest sign` checks the enrollment before requesting a certificate and fails the job with
 exit 2 if the enrollment's pinned trusted root can no longer verify new signatures. When that
@@ -158,10 +140,12 @@ By default, these binaries will be available in `$HOME/go/bin`.
 ## Getting started
 
 After `init`, a release is one command once the commit is tagged: `webcat release -k keys/key1`
-(or `release --type sigstore` in CI). It generates the manifest from the configured build
-directory, signs it with each key given, writes `bundle.json`, the hash-named manifest file and
-the release archive named by the `artifact` template, and commits. The granular `manifest` and
-`bundle` commands remain for multi-signer setups where signatures are collected across machines.
+(or `release --type sigstore` in CI). It inherits the history from the previous release's
+archive, generates the manifest from the configured build directory, signs it with each key
+given, writes `bundle.json` and the hash-named manifest file, and writes the release archive
+named by the `artifact` template. It does not touch git unless asked with `--commit`. The
+granular `manifest` and `bundle` commands remain for multi-signer setups where signatures are
+collected across machines.
 
 `init` offers two built-in Sigsum policies: `test` (the Sigsum test logs, no rate limiting)
 and `production` (`sigsum-generic-2025-1`, logs and witnesses vetted by the Sigsum project).
@@ -177,12 +161,11 @@ everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
 `manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
 ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
 
-### History and git
+### History and releases
 
 `.well-known/webcat/` is the site's append-only history and the directory auditors read
-([spec, server.md section 1](https://github.com/freedomofpress/webcat-spec)). It belongs in the
-repository, and the deploy copies it into the web root. The CLI writes into it and never
-rewrites a hash-named file:
+([spec, server.md section 1](https://github.com/freedomofpress/webcat-spec)). The CLI writes
+into it and never rewrites a hash-named file:
 
 | File | Written by |
 |------|-----------|
@@ -191,20 +174,124 @@ rewrites a hash-named file:
 | `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle |
 | `hashes/<hash>` | `bundle create`, one per `fallback_hashes` entry, copied from the built site (`--directory`, or `directory` in the config) |
 
-Every command that writes there stages the files in git when run inside a repository, and
-`bundle create --commit` commits them. `--no-git` opts out. `history check [ref]` verifies that
-every hash-named file hashes to its name, that the current pointers match them, that every
-fallback the manifest lists is under `hashes/`, and that nothing was modified or deleted since
-`ref`; run it in CI with `origin/main` as the ref.
+The history travels with the releases, not with git. The archive `release` writes, the one the
+`artifact` URL serves for the version, is the web root with `.well-known/webcat/` inside. The
+next `release` downloads the archive of the previous tag, checks every file in it against the
+manifest it ships and every hash-named file against its name, and only then copies the
+directory in and adds the new release on top. Each release thereby proves the previous one was
+what it claimed before building on it, and a single archive carries the whole history. A
+missing or mismatching archive stops the release; `--no-history` overrides, and loses
+everything before this release for every later one.
 
-Hashes follow the spec's canonical JSON rule: documents with `enrollment_schema` or
-`manifest_schema` are hashed over RFC 8785 (JCS); documents without the field predate it and
-keep their OLPC canonical JSON hash, which is what the chain and the logs recorded.
+Sites that prefer to keep the directory in the repository can: `release --commit` and
+`bundle create --commit` commit the written files, and `history check [ref]` verifies that every
+hash-named file hashes to its name, that the current pointers match them, that every fallback
+the manifest lists is under `hashes/`, and that nothing was modified or deleted since `ref`.
+
+Hashes follow the spec's canonical JSON rule: enrollments are hashed over RFC 8785 (JCS);
+manifests with `manifest_schema` too, while manifests without the field predate it and keep
+their OLPC canonical JSON hash, which is what the logs recorded.
 
 When `webcat.config.json` sets `source`, the manifest claims the files build from that
 repository at tag `version`: `manifest generate` requires HEAD to be that tag and `manifest sign`
-requires a clean working tree (`--skip-git-checks` overrides both). `manifest generate --archive`
-writes the release tarball the `artifact` URL must serve for the version.
+requires a clean working tree (`--skip-git-checks` overrides both).
+
+## Releasing from CI
+
+A release is a tag. Work lands on branches as usual; when a commit is tagged, CI checks it out,
+builds the site, runs `webcat release`, uploads the archive where the `artifact` URL resolves
+and deploys the build directory with `.well-known/webcat/` inside. Nothing is pushed back to
+the repository, so the job needs no write access to it. Two things the checkout must provide:
+the tag at HEAD, which is the version, and the previous tag, from which the history is inherited,
+so the clone must not be shallow.
+
+`artifact` in `webcat.config.json` names where each release's archive lives, for example
+`https://codeberg.org/acme/site/releases/download/${version}/site-${version}.tar.gz`;
+`release` writes `site-<version>.tar.gz` in the working directory for the job to upload.
+
+#### GitHub Actions, Sigstore
+
+The job signs with its own identity; the `id-token` permission is what lets it obtain a
+certificate. Enroll with that identity as shown [above](#choosing-sigstore).
+
+```yaml
+# .github/workflows/release.yml
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # to upload the archive to the GitHub release
+      id-token: write     # Sigstore identity
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci && npm run build                          # produces dist/
+      - run: npx @freedomofpress/webcat-cli release --type sigstore
+      - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: cp -r .well-known dist/
+      # deploy dist/ as usual
+```
+
+#### Forgejo Actions, Sigsum
+
+Sigsum signs with a key, so the job holds one as a secret, and production logs want the
+rate-limit token key too (`init` generates both under `keys/`). Every signature the key makes
+is public in the Sigsum logs, and `webcat audit` lists them; that, not the secrecy of the CI
+runner, is what keeps a stolen key from going unnoticed. `manifest sign` needs `sigsum-submit`
+on the path.
+
+```yaml
+# .forgejo/workflows/release.yml
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: docker
+    container:
+      image: node:24
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: https://code.forgejo.org/actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - run: npm ci && npm run build                          # produces dist/
+      - run: |
+          install -m 600 /dev/stdin keys/key1 <<< "$SIGSUM_KEY"
+          install -m 600 /dev/stdin keys/token <<< "$SIGSUM_TOKEN_KEY"
+        env:
+          SIGSUM_KEY: ${{ secrets.SIGSUM_KEY }}
+          SIGSUM_TOKEN_KEY: ${{ secrets.SIGSUM_TOKEN_KEY }}
+      - run: npx @freedomofpress/webcat-cli release -k keys/key1 --token-signing-key keys/token --token-domain example.org
+      - run: mkdir release && mv site-*.tar.gz release/
+      - uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          tag: ${{ github.ref_name }}
+          release-dir: release
+          token: ${{ secrets.RELEASE_TOKEN }}
+      - run: cp -r .well-known dist/
+      # deploy dist/ as usual
+```
+
+For a threshold above one, run `release` with every key the job holds (`-k` is repeatable), or
+sign the generated manifest on other machines with `manifest sign` and finish with
+`bundle create`; the history inheritance then happens in `release`, or by hand with
+`history inherit` when the granular commands are used.
 
 ## Enrollment helpers
 

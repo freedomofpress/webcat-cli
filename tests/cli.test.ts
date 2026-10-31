@@ -562,6 +562,55 @@ describe("history", () => {
     expect(problems.join("\n")).toMatch(/deleted since HEAD/);
     await rm(repo, { recursive: true, force: true });
   });
+
+  it("inherits the previous release's history from its archive after checking it", async () => {
+    const { archiveRelease, checkHistory, enrollmentFileName, inheritHistory, manifestFileName, publishBundle, publishEnrollment, tar } = await import("../src/history");
+    const { createServer } = await import("node:http");
+    const { execFileSync } = await import("node:child_process");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const content = "<h1>release 1</h1>";
+    const document = { manifest: { ...bundle.manifest, files: { "/index.html": toBase64Url(createHash("sha256").update(content).digest()) } }, signatures: bundle.signatures };
+    // Release 1 as deployed: the web root with the well-known directory inside, archived the way release does.
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-prev-"));
+    const site = path.join(repo, "dist");
+    await mkdir(site);
+    await writeFile(path.join(site, "index.html"), content);
+    const wellKnown = path.join(repo, ".well-known/webcat");
+    await publishEnrollment(wellKnown, enrollment);
+    await publishBundle(wellKnown, enrollment, document);
+    const archives = await mkdtemp(path.join(tmpdir(), "webcat-archives-"));
+    await archiveRelease(path.join(archives, "good.tgz"), site, wellKnown);
+    expect(execFileSync("tar", ["-tzf", path.join(archives, "good.tgz")], { encoding: "utf8" })).toMatch(/^\.\/index\.html$/m);
+    expect(execFileSync("tar", ["-tzf", path.join(archives, "good.tgz")], { encoding: "utf8" })).toMatch(/^\.well-known\/webcat\/bundle\.json$/m);
+    await writeFile(path.join(site, "index.html"), "<h1>tampered</h1>");
+    await archiveRelease(path.join(archives, "bad.tgz"), site, wellKnown);
+    const server = createServer(async (req, res) => {
+      try {
+        res.end(await readFile(path.join(archives, path.basename(req.url ?? ""))));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const next = path.join(await mkdtemp(path.join(tmpdir(), "webcat-next-")), ".well-known/webcat");
+      const written = await inheritHistory(next, `${base}/good.tgz`);
+      expect(written.map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect(await checkHistory(next)).toEqual([]);
+      // Inheriting again only refreshes the pointer; hash-named files are already there.
+      expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
+      // An archive whose files do not match the manifest it ships is refused, and so is a missing one.
+      await expect(inheritHistory(next, `${base}/bad.tgz`)).rejects.toThrow(/does not hash as the manifest/);
+      await expect(inheritHistory(next, `${base}/missing.tgz`)).rejects.toThrow(/HTTP 404/);
+      // tar is the same runner release uses for both directions.
+      await expect(tar(["-tzf", path.join(archives, "nope.tgz")])).rejects.toThrow(/failed to run tar/);
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe("canonical form", () => {
@@ -570,7 +619,9 @@ describe("canonical form", () => {
     const legacy = { timestamp: "tree_size 1\nroot_hash aa" };
     expect(canonicalForm(legacy)).toBe('{"timestamp":"tree_size 1\nroot_hash aa"}');
     expect(canonicalForm({ ...legacy, manifest_schema: 1 })).toBe('{"manifest_schema":1,"timestamp":"tree_size 1\\nroot_hash aa"}');
-    expect(canonicalForm({ ...legacy, enrollment_schema: 1 })).toContain("\\n");
+    // Enrollments hash under JCS whatever their version.
+    const { canonicalizeEnrollment } = await import("../src/enrollment");
+    expect(canonicalizeEnrollment(legacy as never)).toContain("\\n");
   });
 });
 

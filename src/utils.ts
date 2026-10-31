@@ -157,5 +157,5 @@ export const hashPolicyBytes = (encodedPolicy: string): string => toBase64Url(sh
 
 // Spec server.md §1.0: a versioned document hashes under RFC 8785 (JCS); one without a schema field was hashed
 // under OLPC canonical JSON when it was enrolled or signed, so that is still its canonical form here.
-export const hasSchema = (doc: object): boolean => "enrollment_schema" in doc || "manifest_schema" in doc;
+export const hasSchema = (doc: object): boolean => "manifest_schema" in doc;
 export const canonicalForm = (doc: object): string => (hasSchema(doc) ? canonicalizeJCS : canonicalizeOLPC)(doc);

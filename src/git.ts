@@ -24,6 +24,8 @@ export const gitRemote = async (cwd?: string): Promise<string | null> => {
 export const gitTagAtHead = (cwd?: string): Promise<string | null> => git(["describe", "--tags", "--exact-match", "HEAD"], cwd);
 export const gitTagExists = async (tag: string, cwd?: string): Promise<boolean> => (await git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], cwd)) !== null;
 export const gitLatestTag = (cwd?: string): Promise<string | null> => git(["describe", "--tags", "--abbrev=0"], cwd);
+// The release before the one HEAD is tagged with: the nearest tag reachable from HEAD's parent.
+export const gitPreviousTag = (cwd?: string): Promise<string | null> => git(["describe", "--tags", "--abbrev=0", "HEAD^"], cwd);
 // Tracked files with uncommitted changes (untracked files are not a reproducibility problem).
 export const gitDirtyFiles = async (cwd?: string): Promise<string[]> => ((await git(["status", "--porcelain", "--untracked-files=no"], cwd)) ?? "").split("\n").filter(Boolean);
 // "M path" / "D path" / "A path" lines for a directory between a ref and the working tree.

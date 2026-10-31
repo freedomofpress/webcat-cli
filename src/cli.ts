@@ -19,8 +19,8 @@ import {
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
 import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
 import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
-import { gitDirtyFiles, gitRoot, gitStage, gitTagAtHead, gitTagExists } from "./git.js";
-import { WELL_KNOWN_DIR, checkHistory, enrollmentFileName, publishBundle, writeOnce } from "./history.js";
+import { gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead, gitTagExists } from "./git.js";
+import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import { checkSite } from "./site.js";
 import {
   DEFAULT_CHAIN_API,
@@ -413,7 +413,6 @@ manifest
   .option("-p, --policy-file <path>", "Sigsum policy file for timestamps", "trust_policy")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
-  .option("--archive <path>", "Also write the release archive (gzip tar of the directory) that the artifact URL will serve")
   .option("--skip-git-checks", "Do not require version to be the tag at HEAD when source is set")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
@@ -441,14 +440,6 @@ manifest
       }
     }
     const document: ManifestDocument = { manifest: buildManifest({ ...config, version }, scan, timestamp) };
-    if (options.archive) {
-      await new Promise<void>((resolve, reject) => {
-        const tar = spawn("tar", ["-czf", options.archive, "-C", options.directory, "--exclude=./.well-known/webcat", "."], { stdio: ["ignore", "inherit", "inherit"] });
-        tar.on("error", (err) => reject(external(`failed to run tar: ${causeOf(err)}`)));
-        tar.on("exit", (code) => (code === 0 ? resolve() : reject(external(`failed to run tar: exit code ${code}`))));
-      });
-      log(`wrote ${options.archive}; publish it where ${config.artifact ?? "the artifact URL"} resolves for version ${version}`);
-    }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
 
@@ -679,7 +670,7 @@ program
 // Runs the granular commands as subprocesses so every flag and exit code behaves exactly as documented.
 program
   .command("release")
-  .description("Generate, sign, bundle and commit the release that HEAD is tagged with (manifest generate + sign + bundle create --commit in one step)")
+  .description("Release the version HEAD is tagged with: inherit the history from the previous release's archive, generate, sign and bundle the manifest, write the new archive")
   .option("-d, --directory <path>", "Directory with the built site (default: config.directory)")
   .addOption(typeOption("Signature"))
   .option("-k, --key <path>", "Sigsum signing key, repeatable up to the threshold (private key, or .pub held in ssh-agent)", collect)
@@ -688,7 +679,8 @@ program
   .option("--oidc-token <value>", "Explicit OIDC token for Sigstore signing")
   .option("--interactive", "OIDC device flow for Sigstore signing")
   .option("--no-archive", "Do not write the release archive even when the config has artifact")
-  .option("--no-commit", "Stage the published files instead of committing them")
+  .option("--no-history", "Do not inherit the well-known directory from the previous release's archive")
+  .option("--commit", "Commit the published files (by default git is not touched)")
   .option("--skip-git-checks", "Skip the tag-at-HEAD and clean-tree checks")
   .action(async (options) => {
     const config = await loadManifestConfig("webcat.config.json");
@@ -706,7 +698,7 @@ program
     const skip = options.skipGitChecks ? ["--skip-git-checks"] : [];
     const unsigned = path.join(work, "manifest.json");
     const signed = path.join(work, "manifest.signed.json");
-    await run("manifest", "generate", "--type", options.type, "-d", directory, "-o", unsigned, ...(archive ? ["--archive", archive] : []), ...skip);
+    await run("manifest", "generate", "--type", options.type, "-d", directory, "-o", unsigned, ...skip);
     if (options.type === "sigsum") {
       let input = unsigned;
       for (const key of options.key as string[]) {
@@ -718,17 +710,39 @@ program
       const auth = options.oidcToken ? ["--oidc-token", options.oidcToken] : options.interactive ? ["--interactive"] : [];
       await run("manifest", "sign", "--type", "sigstore", "-i", unsigned, ...auth, "-o", signed, ...skip);
     }
-    await run("bundle", "create", "-m", signed, "--directory", directory, ...(options.commit ? ["--commit"] : []));
+    // The previous release's archive carries the history up to it; this release adds its own files on top.
+    if (options.history && config.artifact) {
+      const previous = await gitPreviousTag();
+      if (previous) {
+        const inherited = await inheritHistory(WELL_KNOWN_DIR, config.artifact.replace(/\$\{version\}/g, previous));
+        log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from release ${previous}`);
+      } else {
+        log("No previous tag: this release starts the history");
+      }
+    }
+    await run("bundle", "create", "-m", signed, "--directory", directory, options.commit ? "--commit" : "--no-git");
+    if (archive) {
+      await archiveRelease(archive, directory, WELL_KNOWN_DIR);
+      log(`wrote ${archive}; publish it where ${config.artifact} resolves for version ${version}`);
+    }
     await rm(work, { recursive: true, force: true });
-    log(`Released ${version ?? "(unversioned)"}. Left to do: push the commit and tag${archive ? `, upload ${archive} where ${config.artifact} resolves` : ""}, deploy with ${WELL_KNOWN_DIR}/ in the web root`);
+    log(`Released ${version ?? "(unversioned)"}. Left to do: ${archive ? `upload ${archive}, ` : ""}deploy ${directory} with ${WELL_KNOWN_DIR}/ in the web root`);
   });
 
 // ---------------------------------------------------------------------------
 // history
 
-program
-  .command("history")
-  .description("The well-known directory as an append-only ledger")
+const history = program.command("history").description("The well-known directory as an append-only ledger");
+history
+  .command("inherit")
+  .description("Copy the well-known directory out of a previous release's archive after checking it against the manifest it ships (release does this for the previous tag)")
+  .argument("<archive-url>", "The previous release archive, where the artifact template resolves for its version")
+  .option("-d, --dir <path>", "Well-known directory", WELL_KNOWN_DIR)
+  .action(async (url: string, options) => {
+    const written = await inheritHistory(options.dir, url);
+    written.forEach((f) => log(`wrote ${f}`));
+  });
+history
   .command("check")
   .description("Check every hash-named file hashes to its name, the current pointers match them, and nothing was modified or deleted since a git ref (exit 1 on problems)")
   .argument("[ref]", "Git ref to compare against (e.g. HEAD, origin/main); default: no git comparison")
