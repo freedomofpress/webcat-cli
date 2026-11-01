@@ -585,6 +585,12 @@ describe("trusted root drift", () => {
       "new transparency log https://log2026-1 (valid from 2026) is not in the enrollment's trusted root",
       "new timestamp authority https://tsa (valid from 2025) is not in the enrollment's trusted root",
     ]);
+    // A root that distrusts Rekor v1 is not behind the community root: the log it leaves out is older than what it pins.
+    const v2only = { tlogs: [tlog("K2", "https://log2026-1", { start: "2026" })] };
+    expect(trustedRootDrift(v2only, { tlogs: community.tlogs })).toEqual([]);
+    expect(trustedRootDrift(v2only, { tlogs: [...community.tlogs, tlog("K3", "https://log2027-1", { start: "2027" })] })).toEqual([
+      "new transparency log https://log2027-1 (valid from 2027) is not in the enrollment's trusted root",
+    ]);
   });
 });
 

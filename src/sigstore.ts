@@ -84,10 +84,13 @@ export function trustedRootDrift(pinned: any, community: any, now = new Date()):
   const drift: string[] = [];
   for (const [field, kind, id, label, validFor] of ROOT_KINDS) {
     const mine = new Map<string, any>((pinned?.[field] ?? []).map((e: any) => [id(e), e]));
+    // Entries older than the newest pinned one were left out on purpose, as Rekor v1 is; only newer ones are drift.
+    const newestPinned = Math.max(0, ...[...mine.values()].map((e) => Date.parse(validFor(e)?.start ?? "") || 0));
     for (const entry of community?.[field] ?? []) {
       const pinnedEntry = mine.get(id(entry));
       if (!pinnedEntry) {
         if (validFor(entry)?.end && new Date(validFor(entry).end) < now) continue; // already retired, nothing to adopt
+        if ((Date.parse(validFor(entry)?.start ?? "") || 0) <= newestPinned) continue;
         drift.push(`new ${kind} ${label(entry)} (valid from ${validFor(entry)?.start ?? "?"}) is not in the enrollment's trusted root`);
       } else if (validFor(entry)?.end && !validFor(pinnedEntry)?.end) {
         drift.push(`${kind} ${label(entry)} ends on ${validFor(entry).end} in the community root`);
