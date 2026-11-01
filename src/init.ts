@@ -7,7 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
-import { ISSUER_V2_OID, SAN_OID, fetchCommunityTrustedRoot } from "./sigstore.js";
+import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
 import { causeOf, invalid, log, readText, validateAll, validateCasUrl } from "./utils.js";
 
 export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
@@ -50,6 +50,7 @@ export interface InitOptions {
   casUrl?: string;
   identity?: string;
   issuer?: string;
+  keepRekorV1?: boolean; // leave rekor.sigstore.dev in the Sigstore trusted root
   dir: string;
 }
 
@@ -209,7 +210,7 @@ export async function runInit(options: InitOptions): Promise<void> {
         })
       : await buildEnrollmentObject({
           type: "sigstore",
-          trustedRoot: await fetchCommunityTrustedRoot(),
+          trustedRoot: await fetchCommunityTrustedRoot().then((root) => (a.keepRekorV1 ? root : withoutRekorV1(root))),
           claims: { [SAN_OID]: a.identity ?? "", [ISSUER_V2_OID]: a.issuer ?? "" },
           maxAge: a.maxAge,
         });

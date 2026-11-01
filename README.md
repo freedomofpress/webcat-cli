@@ -211,7 +211,9 @@ and/or compatibility flags `--issuer` + `--identity`) and either `--trusted-root
 `--community-trusted-root` to build Sigstore enrollments. Either way the legacy Rekor v1 log
 (`rekor.sigstore.dev`) is removed from the pinned trusted root: manifests signed for such an
 enrollment must be logged to Rekor v2, and a Rekor v1 entry alone does not verify. Pass
-`--keep-rekor-v1` to leave it in, for example to keep signing with `--rekor-api-version 1`.
+`--keep-rekor-v1` to leave it in, for example to keep signing with `--rekor-api-version 1`; `init`
+takes the same flag. Existing enrollments are not affected and report no drift for the log they
+still trust.
 
 | Command | Purpose |
 | --- | --- |

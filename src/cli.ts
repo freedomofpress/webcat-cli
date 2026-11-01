@@ -120,6 +120,7 @@ program
   .command("init")
   .description("Set up a site for WEBCAT: writes webcat.config.json, trust_policy and .well-known/webcat/enrollment.json, then prints the next steps")
   .option("--origin <url>", "Site origin, e.g. https://example.org")
+  .option("--keep-rekor-v1", `Keep ${DEFAULT_REKOR_URL} (Rekor v1) in the Sigstore trusted root instead of distrusting it`)
   .option("--app-version <string>", "Version string for this release (default: 1.0.0)")
   .addOption(typeOption("Enrollment"))
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
