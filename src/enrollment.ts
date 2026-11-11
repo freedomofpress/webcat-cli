@@ -104,7 +104,8 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
               throw invalid("enrollment.signers must not contain duplicates");
             }
           },
-          () => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url"),
+          // Schema 1 has no cas_url (the well-known directory replaced the CAS); schema 0 keeps the one it was enrolled with.
+          ...(enrollment.enrollment_schema === undefined ? [() => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url")] : []),
           () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
           () => {
             if (policyLogs instanceof Error) {
@@ -132,6 +133,14 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
       : []),
   ]);
   return enrollment;
+}
+
+// Schema 0 -> 1 (spec server.md): enrollment_schema 1 and no cas_url. Signers, policy, threshold, claims and trusted
+// root are untouched, so manifests signed under the old enrollment verify under the new one; only the hash changes.
+export function migrateEnrollment(enrollment: Enrollment): Enrollment {
+  if (enrollment.enrollment_schema !== undefined) return enrollment;
+  const { cas_url: _cas, ...rest } = enrollment as SigsumEnrollment;
+  return parseEnrollmentObject({ ...rest, enrollment_schema: 1 }, { authoring: true });
 }
 
 // Same canonical form the oracles and the extension hash.

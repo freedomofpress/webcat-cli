@@ -19,6 +19,8 @@ describe("command line", () => {
     expect(webcat("manifest", "hash", "-m", "examples/manifest.json").stdout).toBe(webcat("manifest", "hash", "-i", "examples/manifest.json").stdout);
     expect(webcat("enrollment", "canonicalize", "-e", "examples/enrollment.json").stdout).toMatch(/^\{"cas_url":/);
     expect(webcat("enrollment", "hash", "-i", "examples/enrollment.json").code).toBe(0);
+    const migrated = webcat("enrollment", "migrate", "-i", "examples/enrollment.json");
+    expect([migrated.code, JSON.parse(migrated.stdout).enrollment_schema, "cas_url" in JSON.parse(migrated.stdout)]).toEqual([0, 1, false]);
   });
 
   it("verifies the example bundle with the extension's verifier", () => {

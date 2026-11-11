@@ -664,6 +664,66 @@ describe("site checks", () => {
   });
 });
 
+describe("schema 1 migrations", () => {
+  it("migrates a Sigsum enrollment from schema 0 to 1 without re-signing", async () => {
+    const { migrateEnrollment } = await import("../src/enrollment");
+    const { validateSigsumEnrollment } = await import("@freedomofpress/webcat/webcat/validators");
+    const { enrollmentHashHex } = await import("../src/chain");
+    const { verifyBundle } = await import("../src/bundle");
+    const bundle = await loadBundleDocument("examples/bundle.json");
+    const old = bundle.enrollment;
+    expect([old.enrollment_schema, typeof (old as any).cas_url]).toEqual([undefined, "string"]);
+    const migrated = migrateEnrollment(old);
+    expect(migrated).toEqual({ ...old, cas_url: undefined, enrollment_schema: 1 });
+    expect("cas_url" in migrated).toBe(false);
+    expect(validateSigsumEnrollment(old as any, 1)?.code).toBe("ERR_WEBCAT_ENROLLMENT_SCHEMA_DEPRECATED");
+    expect(validateSigsumEnrollment(migrated as any, 1)).toBeNull();
+    expect(enrollmentHashHex(migrated)).not.toBe(enrollmentHashHex(old));
+    expect(migrateEnrollment(migrated)).toBe(migrated);
+    // The manifest signed under the old enrollment verifies under the new one: signers, policy and threshold are the same.
+    const result = await verifyBundle({ enrollment: migrated, manifest: bundle.manifest });
+    expect(typeof result === "number" ? "ok" : result.code).toMatch(/^(ok|ERR_WEBCAT_MANIFEST_EXPIRED)$/);
+  });
+
+  it("migrates a Sigstore enrollment from schema 0 to 1 keeping claims and trusted root", async () => {
+    const { migrateEnrollment } = await import("../src/enrollment");
+    const { validateSigstoreEnrollment } = await import("@freedomofpress/webcat/webcat/validators");
+    const { enrollmentHashHex } = await import("../src/chain");
+    const old = parseEnrollmentObject({
+      type: "sigstore",
+      trusted_root: { tlogs: [{ baseUrl: "https://log2025-1.rekor.sigstore.dev", publicKey: { rawBytes: "K2" } }], timestampAuthorities: [{ uri: "https://tsa" }] },
+      claims: { "2.5.29.17": "https://github.com/o/r/.github/workflows/w.yml@refs/heads/main", "1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com" },
+      max_age: 5184000,
+    });
+    const migrated = migrateEnrollment(old);
+    expect(migrated).toEqual({ ...old, enrollment_schema: 1 });
+    expect(validateSigstoreEnrollment(old as any, 1)?.code).toBe("ERR_WEBCAT_ENROLLMENT_SCHEMA_DEPRECATED");
+    expect(validateSigstoreEnrollment(migrated as any, 1)).toBeNull();
+    expect(enrollmentHashHex(migrated)).not.toBe(enrollmentHashHex(old));
+    expect(migrateEnrollment(migrated)).toBe(migrated);
+  });
+
+  it("renews a schema 0 manifest as schema 1 from the config it was generated with", async () => {
+    const { validateManifest } = await import("@freedomofpress/webcat/webcat/validators");
+    const legacy = (await loadManifestDocument("examples/manifest.json")).manifest;
+    expect([legacy.manifest_schema, typeof legacy.app, typeof legacy.default_index]).toEqual([undefined, "string", "string"]);
+    expect(validateManifest(legacy)).toBeNull();
+    expect(validateManifest(legacy, 1)?.code).toBe("ERR_WEBCAT_MANIFEST_SCHEMA_DEPRECATED");
+    // The same config, as init wrote it before schema 1, now yields a schema 1 manifest.
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-renew-"));
+    await writeFile(path.join(dir, "index.html"), "home");
+    await writeFile(path.join(dir, "error.html"), "lost");
+    const config = { app: legacy.app, version: "1.12.3", default_csp: legacy.default_csp, default_index: "index.html", default_fallback: "/error.html", wasm: [], extra_csp: {} };
+    await writeFile(path.join(dir, "webcat.config.json"), JSON.stringify(config));
+    const renewed = buildManifest(await loadManifestConfig(path.join(dir, "webcat.config.json")), await scanDirectory(dir));
+    expect([renewed.manifest_schema, renewed.app, renewed.default_index, renewed.default_fallback]).toEqual([1, undefined, undefined, undefined]);
+    expect(renewed.files["/"]).toBe(renewed.files["/index.html"]);
+    expect(renewed.fallback_hashes).toEqual([renewed.files["/error.html"]]);
+    expect(validateManifest(renewed, 1)).toBeNull();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
 describe("enrollment chain client", () => {
   it("solves proof of work challenges", () => {
     const challenge = "ca8dc16136a1df96d1c258bafbb23b096f7e1c28d22da0237dccd05d3c739f0e";

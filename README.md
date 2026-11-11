@@ -249,6 +249,24 @@ webcat enrollment create \
   --max-age 3600
 ```
 
+### Migrating to schema 1
+
+Enrollments and manifests gained a schema field (spec server.md and manifest.md). Extension 3.3.0
+accepts both generations; a later release will set a minimum and reject the old one.
+
+- Manifests migrate on the next release: `manifest generate` writes schema 1 from the same
+  `webcat.config.json`, and it verifies under the existing enrollment, old or new.
+- Enrollments change hash, so they go through the chain again:
+
+```sh
+webcat enrollment migrate -i .well-known/webcat/enrollment.json -o enrollment.json   # schema 1, no cas_url
+# bundle it with the current signed manifest, keep the current bundle.json as bundle-prev.json, deploy
+webcat enrollment submit example.org
+```
+
+Nothing signatures depend on changes, so the manifest already signed keeps verifying under the
+migrated enrollment; no re-signing is needed.
+
 ### Submitting and checking an enrollment
 
 Once `enrollment.json` is served at `https://<domain>/.well-known/webcat/enrollment.json`,

@@ -3,7 +3,7 @@ import path from "node:path";
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
-import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment } from "./enrollment.js";
+import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment } from "./enrollment.js";
 import { publishManifestToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
@@ -302,6 +302,25 @@ enrollment
   .action(async (options) => {
     const canonical = canonicalizeEnrollment(await loadEnrollment(options.input));
     process.stdout.write(toBase64Url(sha256(canonical)) + "\n");
+  });
+
+enrollment
+  .command("migrate")
+  .description("Rewrite an enrollment as schema 1: enrollment_schema 1 and no cas_url, everything signatures depend on unchanged")
+  .option("-i, --input <path>", "Enrollment file to migrate", ".well-known/webcat/enrollment.json")
+  .option("-o, --output <path>", "Write the migrated enrollment to a file instead of stdout")
+  .action(async (options) => {
+    const current = await loadEnrollment(options.input);
+    const migrated = migrateEnrollment(current);
+    if (migrated === current) {
+      log(`${options.input} is already schema ${current.enrollment_schema}; nothing to migrate`);
+    }
+    await writeOutput(options.output, JSON.stringify(migrated, null, 2));
+    if (migrated !== current) {
+      log(
+        `enrollment hash ${enrollmentHashHex(current).slice(0, 16)}… becomes ${enrollmentHashHex(migrated).slice(0, 16)}…: publish it in a new bundle, keep the current bundle as bundle-prev.json, then run enrollment submit <domain>`,
+      );
+    }
   });
 
 enrollment
