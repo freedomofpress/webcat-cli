@@ -10,7 +10,7 @@ import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
 import { auditDomain, formatAudit } from "./audit.js";
 import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
-import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritHistory, publishBundle, writeOnce } from "./history.js";
+import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
   ManifestDocument,
   buildManifest,
@@ -140,6 +140,7 @@ program
   .option("--artifact <url>", "Release archive URL template containing ${version}; empty if none")
   .option("--directory <path>", "Directory the build writes the site into (default: dist)")
   .option("--no-workflows", "Do not write the CI jobs (webcat-release.yml, webcat-verify.yml) for the forge of source")
+  .addOption(new Option("--cas-url <url>", "Ignored: enrollments carry no cas_url since schema 1").hideHelp())
   .addOption(typeOption("Enrollment"))
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
   .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
@@ -227,6 +228,7 @@ const enrollmentCreate = enrollment
   .option("-m, --max-age <seconds>", "Maximum age in seconds")
   .option("-o, --output <path>", "Write result to file instead of stdout, with its hash-named copy next to it")
   .option("--no-git", "Do not stage the written files in git")
+  .addOption(new Option("-c, --cas-url <url>", "Ignored: enrollments carry no cas_url since schema 1").hideHelp())
   .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
   .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
@@ -244,6 +246,7 @@ for (const [flag, oid] of SIGSTORE_CLAIM_FLAGS) {
   enrollmentCreate.addOption(new Option(`--${flag} <value>`, `Sigstore claim OID ${oid}`).hideHelp());
 }
 enrollmentCreate.action(async (options) => {
+  if (options.casUrl) log("Warning: --cas-url is ignored; enrollments carry no cas_url since schema 1 and the well-known directory is the history");
   let enrollmentObject: Enrollment;
   if (options.type === "sigsum") {
     requireOptions(
@@ -725,7 +728,8 @@ program
 // Runs the granular commands as subprocesses so every flag and exit code behaves exactly as documented.
 program
   .command("release")
-  .description("Release the version HEAD is tagged with: inherit the history from the previous release's archive, generate, sign and bundle the manifest, write the new archive")
+  .description("Release the version HEAD is tagged with: inherit the history from the previous release's archive (or the live site), generate, sign and bundle the manifest, write the new archive")
+  .option("-c, --config <path>", "Manifest config JSON file", "webcat.config.json")
   .option("-d, --directory <path>", "Directory with the built site (default: config.directory)")
   .addOption(typeOption("Signature"))
   .option("-k, --key <path>", "Sigsum signing key, repeatable up to the threshold (private key, or .pub held in ssh-agent)", collect)
@@ -734,11 +738,11 @@ program
   .option("--oidc-token <value>", "Explicit OIDC token for Sigstore signing")
   .option("--interactive", "OIDC device flow for Sigstore signing")
   .option("--no-archive", "Do not write the release archive even when the config has artifact")
-  .option("--no-history", "Do not inherit the well-known directory from the previous release's archive")
+  .option("--no-history", "Do not inherit the well-known directory from the previous release's archive or the live site")
   .option("--commit", "Commit the published files (by default git is not touched)")
   .option("--skip-git-checks", "Skip the tag-at-HEAD and clean-tree checks")
   .action(async (options) => {
-    const config = await loadManifestConfig("webcat.config.json");
+    const config = await loadManifestConfig(options.config);
     const directory = options.directory ?? config.directory;
     if (!directory) throw invalid("--directory is required (or set directory in webcat.config.json)");
     if (options.type === "sigsum") requireOption(options.key, "--key", "a sigsum release");
@@ -753,7 +757,7 @@ program
     const skip = options.skipGitChecks ? ["--skip-git-checks"] : [];
     const unsigned = path.join(work, "manifest.json");
     const signed = path.join(work, "manifest.signed.json");
-    await run("manifest", "generate", "--type", options.type, "-d", directory, "-o", unsigned, ...skip);
+    await run("manifest", "generate", "--type", options.type, "-c", options.config, "-d", directory, "-o", unsigned, ...skip);
     if (options.type === "sigsum") {
       let input = unsigned;
       for (const key of options.key as string[]) {
@@ -766,14 +770,24 @@ program
       await run("manifest", "sign", "--type", "sigstore", "-i", unsigned, ...auth, "-o", signed, ...skip);
     }
     // The previous release's archive carries the history up to it; this release adds its own files on top.
-    if (options.history && config.artifact) {
-      const previous = await gitPreviousTag();
-      if (previous) {
-        const inherited = await inheritHistory(WELL_KNOWN_DIR, config.artifact.replace(/\$\{version\}/g, previous));
-        log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from release ${previous}`);
-      } else {
-        log("No previous tag: this release starts the history");
+    if (options.history) {
+      // The history up to now: the previous release's archive, else what the site serves today (origin in the config).
+      const previous = config.artifact ? await gitPreviousTag() : null;
+      const archiveUrl = previous && config.artifact ? config.artifact.replace(/\$\{version\}/g, previous) : null;
+      let inherited: string[] | null = null;
+      if (archiveUrl) {
+        inherited = await inheritHistory(WELL_KNOWN_DIR, archiveUrl).catch((err) => {
+          if (!config.origin) throw err;
+          log(`Warning: ${causeOf(err)}; inheriting from ${config.origin} instead`);
+          return null;
+        });
+        if (inherited) log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from release ${previous}`);
       }
+      if (!inherited && config.origin) {
+        inherited = await inheritFromSite(WELL_KNOWN_DIR, config.origin);
+        log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from ${config.origin}`);
+      }
+      if (!inherited) log(`No previous archive${config.origin ? "" : " and no origin in the config"}: this release starts the history`);
     }
     await run("bundle", "create", "-m", signed, "--directory", directory, options.commit ? "--commit" : "--no-git");
     if (archive) {
@@ -791,10 +805,10 @@ const history = program.command("history").description("The well-known directory
 history
   .command("inherit")
   .description("Copy the well-known directory out of a previous release's archive after checking it against the manifest it ships (release does this for the previous tag)")
-  .argument("<archive-url>", "The previous release archive, where the artifact template resolves for its version")
+  .argument("<source>", "The previous release archive (where the artifact template resolves for its version), or the site's https origin to take what it serves")
   .option("-d, --dir <path>", "Well-known directory", WELL_KNOWN_DIR)
   .action(async (url: string, options) => {
-    const written = await inheritHistory(options.dir, url);
+    const written = await (/^https?:\/\/[^/]+\/?$/.test(url) ? inheritFromSite(options.dir, url) : inheritHistory(options.dir, url));
     written.forEach((f) => log(`wrote ${f}`));
   });
 history

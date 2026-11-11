@@ -295,6 +295,8 @@ describe("manifest configuration", () => {
     expect(buildManifest({ ...config, fallbacks: [] }, scan).fallback_hashes).toBeUndefined();
     expect(buildManifest({ ...config, source: "https://github.com/o/r", artifact: "https://x/${version}.tgz" }, scan)).toMatchObject({ source: "https://github.com/o/r", artifact: "https://x/${version}.tgz" });
     expect(() => buildManifest({ ...config, version: "1" }, scan)).toThrow("config.version must be a semantic version such as 1.4.0, got '1'");
+    // clean_urls: the host serves /404.html at /404 too, so both are listed; index files only get their directory key.
+    expect(Object.keys(buildManifest({ ...config, clean_urls: true }, scan).files)).toEqual(["/", "/404", "/404.html", "/docs/", "/docs/index.html", "/index.html"]);
     expect(() => buildManifest({ ...config, fallbacks: ["/missing.html"] }, scan)).toThrow("config.fallbacks must name scanned files, '/missing.html' was not found");
     expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
@@ -800,6 +802,45 @@ describe("history", () => {
       expect(await checkHistory(next)).toEqual([]);
       // Inheriting again only refreshes the pointer; hash-named files are already there.
       expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
+      // An archive from the old CLI carries only the pointers: the hash-named files are derived from them.
+      const { materializeHistory, inheritFromSite, publishEnrollment: _pe } = await import("../src/history");
+      const legacyRoot = await mkdtemp(path.join(tmpdir(), "webcat-legacy-"));
+      const legacyWellKnown = path.join(legacyRoot, ".well-known/webcat");
+      await mkdir(legacyWellKnown, { recursive: true });
+      await writeFile(path.join(legacyWellKnown, "enrollment.json"), JSON.stringify(enrollment));
+      await writeFile(path.join(legacyWellKnown, "bundle.json"), JSON.stringify({ enrollment, manifest: document.manifest, signatures: document.signatures }));
+      await archiveRelease(path.join(archives, "legacy.tgz"), site.replace(/dist$/, "dist"), legacyWellKnown).catch(() => undefined);
+      await writeFile(path.join(site, "index.html"), content); // back to what the manifest says
+      await archiveRelease(path.join(archives, "legacy.tgz"), site, legacyWellKnown);
+      const fromLegacy = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromlegacy-")), ".well-known/webcat");
+      expect((await inheritHistory(fromLegacy, `${base}/legacy.tgz`)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect(await checkHistory(fromLegacy)).toEqual([]);
+      // The live site as the source: what it serves under the well-known path, materialized the same way.
+      const siteServer = createServer(async (req, res) => {
+        try {
+          res.end(await readFile(path.join(legacyRoot, decodeURIComponent(req.url ?? "/"))));
+        } catch {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      await new Promise<void>((resolve) => siteServer.listen(0, "127.0.0.1", resolve));
+      const origin = `http://127.0.0.1:${(siteServer.address() as { port: number }).port}`;
+      try {
+        const fromSite = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromsite-")), ".well-known/webcat");
+        expect((await inheritFromSite(fromSite, origin)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+        expect(await checkHistory(fromSite)).toEqual([]);
+        // A migrated enrollment published on top: enrollment.json follows the bundle, the inherited bundle becomes bundle-prev.
+        const migrated = { ...enrollment, enrollment_schema: 1 as const };
+        const published = await publishBundle(fromSite, migrated, document);
+        expect(published.map((f) => path.basename(f))).toEqual(expect.arrayContaining(["enrollment.json", "bundle-prev.json", "bundle.json"]));
+        expect(JSON.parse(await readFile(path.join(fromSite, "enrollment.json"), "utf8")).enrollment_schema).toBe(1);
+        expect(await checkHistory(fromSite)).toEqual([]);
+        expect(await materializeHistory(fromSite)).toEqual([]); // nothing left to derive
+      } finally {
+        siteServer.close();
+      }
+      await writeFile(path.join(site, "index.html"), "<h1>tampered</h1>");
       // An archive whose files do not match the manifest it ships is refused, and so is a missing one.
       await expect(inheritHistory(next, `${base}/bad.tgz`)).rejects.toThrow(/does not hash as the manifest/);
       await expect(inheritHistory(next, `${base}/missing.tgz`)).rejects.toThrow(/HTTP 404/);

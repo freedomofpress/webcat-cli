@@ -219,11 +219,25 @@ webcat enrollment create \
   --max-age 3600
 ```
 
-### Migrating to schema 1
+### Migrating an existing site
 
 Enrollments and manifests gained a schema field (spec server.md and manifest.md). Extension 3.3.0
 accepts both generations; a later release will set a minimum and reject the old one. There is
 nothing to run on purpose: the commands a release already goes through migrate as they go.
+
+1. In `webcat.config.json`: drop `app`; add `source`, `artifact`, `directory` and `origin`
+   (the site's https origin); make `version` a semantic version, or remove it and tag releases.
+   `clean_urls: true` if the host serves `/page.html` at `/page` too.
+2. Move the enrollment to `.well-known/webcat/enrollment.json` if it lives elsewhere; it and
+   the `.well-known/webcat/` directory belong in the repository.
+3. Fix the policy if `csp hint` rejects it; extension 3.3.0 requires a `sandbox` directive on a
+   policy that can frame another origin.
+4. Tag and run `webcat release` (or let `init --no-workflows=false` write the CI job). The first
+   release inherits the history from the previous tag's archive when `artifact` points at one,
+   even one made by the old CLI, else from what `origin` serves today, so the manifest served
+   now stays in the history and the old bundle becomes `bundle-prev.json`.
+5. Deploy, then `webcat enrollment submit <domain>`: the enrollment hash changed, and the chain
+   must record it. `site check` and `audit` confirm what visitors and auditors see.
 
 - `manifest generate` writes schema 1 from the same `webcat.config.json`; `manifest sign`
   migrates an unsigned schema 0 manifest before signing. Either verifies under the existing
@@ -676,6 +690,8 @@ or a JSON equivalent) matching the schema below:
 | `artifact` | string | Optional. Release archive URL template containing `${version}`; auditors fetch it. |
 | `version` | string | Semantic version of this release, such as `1.4.0`; a leading `v` is tolerated. Optional: without it the git tag at HEAD is the version. |
 | `directory` | string | Optional. Where the build writes the site; `release` and `bundle create` read it. |
+| `origin` | string | Optional. The site's https origin; `release` inherits the history from what it serves when no archive has it. |
+| `clean_urls` | boolean | Optional. The host serves `/page.html` at `/page` too (Vercel, Netlify, Cloudflare Pages): both are listed. |
 | `app` | string | Deprecated and ignored: manifests no longer carry it. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Optional, `index.html`. The file a directory path stands for: `/docs/` gets the hash of `/docs/index.html`. |

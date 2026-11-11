@@ -11,6 +11,8 @@ export type ManifestContent = Manifest;
 export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "version" | "manifest_schema" | "default_index" | "default_fallback" | "fallback_hashes"> & {
   version?: string; // absent when the release tag at HEAD is the version
   directory?: string; // where the built site lives (CLI-only, never in the manifest)
+  origin?: string; // https origin of the site (CLI-only): where release inherits the history from when no archive has it
+  clean_urls?: boolean; // the host serves /page.html at /page too (Vercel, Netlify, Cloudflare Pages): list both
   default_index: string;
   fallbacks: string[];
 };
@@ -108,7 +110,10 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   const optional = (key: string): string | undefined => (c[key] === undefined ? undefined : str(key));
   validateAll([
     ...["default_csp", "default_index"].map((key) => () => str(key)),
-    ...["version", "source", "artifact", "directory"].map((key) => () => optional(key)),
+    ...["version", "source", "artifact", "directory", "origin"].map((key) => () => optional(key)),
+    () => {
+      if (c.clean_urls !== undefined && typeof c.clean_urls !== "boolean") throw invalid("config.clean_urls must be true or false");
+    },
     () => {
       if (!Array.isArray(fallbacks) || !fallbacks.every((f) => typeof f === "string" && f.startsWith("/"))) {
         throw invalid("config.fallbacks must be an array of '/'-prefixed paths");
@@ -131,6 +136,8 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
     ...(c.artifact !== undefined ? { artifact: str("artifact") } : {}),
     ...(c.version !== undefined ? { version: str("version") } : {}),
     ...(c.directory !== undefined ? { directory: str("directory") } : {}),
+    ...(c.origin !== undefined ? { origin: str("origin") } : {}),
+    ...(c.clean_urls ? { clean_urls: true } : {}),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
     fallbacks: fallbacks as string[],
@@ -187,6 +194,9 @@ export function buildManifest(config: ManifestConfig & { version: string }, scan
   const suffix = `/${config.default_index}`;
   for (const p of Object.keys(files)) {
     if (p.endsWith(suffix)) files[p.slice(0, 1 - suffix.length)] ??= files[p];
+  }
+  if (config.clean_urls) {
+    for (const p of Object.keys(files)) if (p.endsWith(".html") && !p.endsWith(`/${config.default_index}`)) files[p.slice(0, -5)] ??= files[p];
   }
   const fallbacks = config.fallbacks.filter((p) => files[p]); // the missing ones are reported below
   const fallback_hashes = fallbacks.map((p) => files[p]);

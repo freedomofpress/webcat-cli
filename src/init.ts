@@ -236,6 +236,7 @@ export async function runInit(options: InitOptions): Promise<void> {
     ...(a.artifact ? { artifact: a.artifact } : {}),
     ...(!a.source || options.version !== undefined ? { version: a.version } : {}),
     directory: a.directory,
+    origin: a.origin,
     default_csp: a.csp,
     default_index: "index.html",
     fallbacks: ["/index.html"],

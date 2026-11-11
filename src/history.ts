@@ -80,6 +80,13 @@ export async function publishBundle(dir: string, enrollment: Enrollment, documen
   const manifestName = manifestFileName(enrollment, document);
   if (await writeOnce(dir, manifestName, pretty({ manifest: document.manifest, signatures: document.signatures }))) written.push(path.join(dir, manifestName));
   if (await writeOnce(dir, enrollmentFileName(enrollment), pretty(enrollment))) written.push(path.join(dir, enrollmentFileName(enrollment)));
+  // enrollment.json is what the oracles observe; it must be the enrollment the bundle carries (a migration changes it).
+  const pointer = path.join(dir, "enrollment.json");
+  if ((await readFile(pointer, "utf8").catch(() => null)) !== pretty(enrollment)) {
+    await mkdir(dir, { recursive: true });
+    await writeFile(pointer, pretty(enrollment));
+    written.push(pointer);
+  }
   const current = path.join(dir, "bundle.json");
   const previous = await readFile(current, "utf8").catch(() => null);
   if (previous !== null) {
@@ -93,6 +100,34 @@ export async function publishBundle(dir: string, enrollment: Enrollment, documen
   await mkdir(dir, { recursive: true });
   await writeFile(current, pretty(bundle));
   written.push(current);
+  return written;
+}
+
+// A directory from before the history files existed (the old CLI, or a hand-made deploy) has only the pointers.
+// The hash-named files are derived from them: the bundle carries the enrollment and the signed manifest in full.
+export async function materializeHistory(dir: string): Promise<string[]> {
+  const written: string[] = [];
+  for (const name of ["bundle-prev.json", "bundle.json", "enrollment.json"]) {
+    const text = await readFile(path.join(dir, name), "utf8").catch(() => null);
+    if (text === null) continue;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue; // a catch-all page or a broken pointer: checkHistory reports it
+    }
+    try {
+      const enrollment = parseEnrollmentObject(name === "enrollment.json" ? parsed : parsed.enrollment);
+      if (await writeOnce(dir, enrollmentFileName(enrollment), pretty(enrollment))) written.push(path.join(dir, enrollmentFileName(enrollment)));
+      if (name !== "enrollment.json") {
+        const document = parseManifestDocumentObject({ manifest: parsed.manifest, signatures: parsed.signatures });
+        const manifestName = manifestFileName(enrollment, document);
+        if (await writeOnce(dir, manifestName, pretty({ manifest: document.manifest, signatures: document.signatures }))) written.push(path.join(dir, manifestName));
+      }
+    } catch {
+      // not a bundle or enrollment the extension would accept: checkHistory reports it
+    }
+  }
   return written;
 }
 
@@ -222,26 +257,83 @@ export async function inheritHistory(dir: string, archiveUrl: string): Promise<s
     if (mismatched.length > 0) {
       throw invalid(`${archiveUrl}: ${mismatched[0].split(" ")[0]} is missing or does not hash as the manifest of release ${document.manifest.version} says; not inheriting its history`);
     }
+    // An archive from before the history files existed only has the pointers; what they carry becomes the history.
+    const materialized = await materializeHistory(previous);
+    if (materialized.length) log(`${archiveUrl} predates the history files: ${materialized.length} derived from its bundle`);
     const problems = await checkHistory(previous);
     if (problems.length > 0) throw invalid(`${archiveUrl}: ${WELL_KNOWN_DIR} is inconsistent: ${problems.join("; ")}`);
-    const written: string[] = [];
-    await mkdir(dir, { recursive: true });
-    for (const name of await readdir(previous)) {
-      const content = await readFile(path.join(previous, name), "utf8").catch(() => null);
-      if (content === null) continue;
-      if (HASH_FILE.test(name)) {
-        if (await writeOnce(dir, name, content)) written.push(path.join(dir, name));
-      } else if (name === "bundle.json" || name === "bundle-prev.json") {
-        await writeFile(path.join(dir, name), content);
-        written.push(path.join(dir, name));
-      }
-    }
-    for (const name of await readdir(path.join(previous, HASHES_DIR)).catch(() => [] as string[])) {
-      const content = await readFile(path.join(previous, HASHES_DIR, name), "utf8");
-      if (await writeOnce(path.join(dir, HASHES_DIR), name, content)) written.push(path.join(dir, HASHES_DIR, name));
-    }
-    return written;
+    return await copyHistory(previous, dir); // await: the finally below removes the source once the copy is done, not before
   } finally {
     await cleanup();
+  }
+}
+
+// Hash-named files and fallbacks are written once; the pointers are taken over as they are.
+async function copyHistory(from: string, dir: string): Promise<string[]> {
+  const written: string[] = [];
+  await mkdir(dir, { recursive: true });
+  for (const name of await readdir(from)) {
+    const content = await readFile(path.join(from, name), "utf8").catch(() => null);
+    if (content === null) continue;
+    if (HASH_FILE.test(name)) {
+      if (await writeOnce(dir, name, content)) written.push(path.join(dir, name));
+    } else if (name === "bundle.json" || name === "bundle-prev.json") {
+      await writeFile(path.join(dir, name), content);
+      written.push(path.join(dir, name));
+    }
+  }
+  for (const name of await readdir(path.join(from, HASHES_DIR)).catch(() => [] as string[])) {
+    const content = await readFile(path.join(from, HASHES_DIR, name), "utf8");
+    if (await writeOnce(path.join(dir, HASHES_DIR), name, content)) written.push(path.join(dir, HASHES_DIR, name));
+  }
+  return written;
+}
+
+// The live site as the history source: what it serves under the well-known path, pointers and the hash-named files
+// they lead to. The first release with this CLI inherits from here, so the manifest served today stays in the history
+// and the previous bundle is there to rotate when the enrollment migrates.
+export async function inheritFromSite(dir: string, origin: string): Promise<string[]> {
+  const base = `${origin.replace(/\/+$/, "")}/${WELL_KNOWN_DIR}`;
+  const work = await mkdtemp(path.join(tmpdir(), "webcat-site-"));
+  try {
+    const fetched: string[] = [];
+    const get = async (name: string): Promise<string | null> => {
+      const response = await fetch(`${base}/${name}`).catch((err) => {
+        throw external(`failed to fetch ${base}/${name}: ${causeOf(err)}`);
+      });
+      if (!response.ok) return null;
+      const text = await response.text();
+      try {
+        if (typeof JSON.parse(text) !== "object") return null;
+      } catch {
+        return null; // a catch-all page
+      }
+      await writeFile(path.join(work, name), text);
+      fetched.push(name);
+      return text;
+    };
+    const bundle = await get("bundle.json");
+    if (bundle === null) throw external(`${base}/bundle.json is not served; nothing to inherit from the site`);
+    await get("bundle-prev.json");
+    await get("enrollment.json");
+    await materializeHistory(work);
+    // Hash-named files the site already serves for what the pointers name, so a later audit finds the same bytes.
+    for (const name of await readdir(work)) {
+      if (!HASH_FILE.test(name)) continue;
+      const served = await get(name);
+      if (served !== null) await writeFile(path.join(work, name), served);
+    }
+    for (const hash of parseManifestDocumentObject({ manifest: JSON.parse(bundle).manifest, signatures: JSON.parse(bundle).signatures }).manifest.fallback_hashes ?? []) {
+      const response = await fetch(`${base}/${HASHES_DIR}/${hash}`).catch(() => null);
+      if (response?.ok) {
+        await mkdir(path.join(work, HASHES_DIR), { recursive: true });
+        await writeFile(path.join(work, HASHES_DIR, hash), new Uint8Array(await response.arrayBuffer()));
+      }
+    }
+    const problems = await checkHistory(work);
+    if (problems.length > 0) throw invalid(`${base}: inconsistent: ${problems.join("; ")}`);
+    return await copyHistory(work, dir); // await: the finally below removes the source once the copy is done, not before
+  } finally {
+    await rm(work, { recursive: true, force: true });
   }
 }
