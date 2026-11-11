@@ -7,7 +7,7 @@ import { hasSchema } from "@freedomofpress/webcat/webcat/canonicalize";
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
-import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
+import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment } from "./enrollment.js";
 import { auditDomain, formatAudit } from "./audit.js";
 import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce } from "./history.js";

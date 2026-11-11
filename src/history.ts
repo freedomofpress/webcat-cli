@@ -296,7 +296,6 @@ export async function inheritFromSite(dir: string, origin: string): Promise<stri
   const base = `${origin.replace(/\/+$/, "")}/${WELL_KNOWN_DIR}`;
   const work = await mkdtemp(path.join(tmpdir(), "webcat-site-"));
   try {
-    const fetched: string[] = [];
     const get = async (name: string): Promise<string | null> => {
       const response = await fetch(`${base}/${name}`).catch((err) => {
         throw external(`failed to fetch ${base}/${name}: ${causeOf(err)}`);
@@ -309,7 +308,6 @@ export async function inheritFromSite(dir: string, origin: string): Promise<stri
         return null; // a catch-all page
       }
       await writeFile(path.join(work, name), text);
-      fetched.push(name);
       return text;
     };
     const bundle = await get("bundle.json");

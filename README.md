@@ -235,7 +235,7 @@ nothing to run on purpose: the commands a release already goes through migrate a
    the `.well-known/webcat/` directory belong in the repository.
 3. Fix the policy if `csp hint` rejects it; extension 3.3.0 requires a `sandbox` directive on a
    policy that can frame another origin.
-4. Tag and run `webcat release` (or let `init --no-workflows=false` write the CI job). The first
+4. Tag and run `webcat release`, by hand or from the CI job `init` writes. The first
    release inherits the history from the previous tag's archive when `artifact` points at one,
    even one made by the old CLI, else from what `origin` serves today, so the manifest served
    now stays in the history and the old bundle becomes `bundle-prev.json`.
