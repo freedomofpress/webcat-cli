@@ -1,4 +1,5 @@
 // Runs the real command line (not the helpers) over the examples: the layer unit tests cannot see.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -22,8 +23,9 @@ describe("command line", () => {
   });
 
   it("bundle create migrates the enrollment to schema 1 and leaves the signed manifest alone", () => {
-    const { stdout, code } = webcat("bundle", "create", "-e", "examples/enrollment.json", "-m", "examples/manifest.json");
-    const bundle = JSON.parse(stdout);
+    const out = path.join(tmpdir(), `webcat-smoke-${process.pid}.json`);
+    const { code } = webcat("bundle", "create", "-e", "examples/enrollment.json", "-m", "examples/manifest.json", "-o", out);
+    const bundle = JSON.parse(readFileSync(out, "utf8"));
     expect([code, bundle.enrollment.enrollment_schema, "cas_url" in bundle.enrollment, bundle.manifest.manifest_schema]).toEqual([0, 1, false, undefined]);
   });
 

@@ -333,8 +333,7 @@ describe("manifest configuration", () => {
     );
   });
 
-  it("reads old and new configs alike and publishes fallbacks under their hash", async () => {
-    const { writeFallbackCopies } = await import("../src/manifest");
+  it("reads old and new configs alike", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-fallback-"));
     const base = { app: "https://example.com", version: "1.0.0", default_csp: "default-src 'none'" };
     await writeFile(path.join(dir, "legacy.json"), JSON.stringify({ ...base, default_index: "/index.html", default_fallback: "/404.html" }));
@@ -347,10 +346,8 @@ describe("manifest configuration", () => {
     await writeFile(path.join(dir, "404.html"), "lost");
     await writeFile(path.join(dir, "index.html"), "home");
     const config = await loadManifestConfig(path.join(dir, "legacy.json"));
-    const manifest = buildManifest(config, await scanDirectory(dir, { excludePaths: ["legacy.json", "bare.json", "new.json"] }));
-    const hash = toBase64Url(createHash("sha256").update("lost").digest());
-    expect(await writeFallbackCopies(dir, config, manifest)).toEqual([`/.well-known/webcat/hashes/${hash}`]);
-    expect(await readFile(path.join(dir, ".well-known/webcat/hashes", hash), "utf8")).toBe("lost");
+    const manifest = buildManifest({ ...config, version: "1.0.0" }, await scanDirectory(dir, { excludePaths: ["legacy.json", "bare.json", "new.json"] }));
+    expect(manifest.fallback_hashes).toEqual([toBase64Url(createHash("sha256").update("lost").digest())]);
     await rm(dir, { recursive: true, force: true });
   });
 });
@@ -714,12 +711,110 @@ describe("schema 1 migrations", () => {
     await writeFile(path.join(dir, "error.html"), "lost");
     const config = { app: legacy.app, version: "1.12.3", default_csp: legacy.default_csp, default_index: "index.html", default_fallback: "/error.html", wasm: [], extra_csp: {} };
     await writeFile(path.join(dir, "webcat.config.json"), JSON.stringify(config));
-    const renewed = buildManifest(await loadManifestConfig(path.join(dir, "webcat.config.json")), await scanDirectory(dir));
+    const renewed = buildManifest({ ...(await loadManifestConfig(path.join(dir, "webcat.config.json"))), version: "1.12.3" }, await scanDirectory(dir));
     expect([renewed.manifest_schema, renewed.app, renewed.default_index, renewed.default_fallback]).toEqual([1, undefined, undefined, undefined]);
     expect(renewed.files["/"]).toBe(renewed.files["/index.html"]);
     expect(renewed.fallback_hashes).toEqual([renewed.files["/error.html"]]);
     expect(validateManifest(renewed, 1)).toBeNull();
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("history", () => {
+  it("writes hash-named files once, rotates bundle-prev on enrollment change, and flags edits since a ref", async () => {
+    const { checkHistory, enrollmentFileName, manifestFileName, publishBundle, publishEnrollment, writeOnce } = await import("../src/history");
+    const { execFileSync } = await import("node:child_process");
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-history-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    const dir = path.join(repo, ".well-known/webcat");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const document = { manifest: bundle.manifest, signatures: bundle.signatures };
+    await publishEnrollment(dir, enrollment);
+    const written = await publishBundle(dir, enrollment, document);
+    expect(written.map((f) => path.basename(f)).sort()).toEqual([manifestFileName(enrollment, document), "bundle.json"].sort());
+    expect(await checkHistory(dir)).toEqual([]);
+    // A schema 1 manifest lists its fallback by hash; the document is copied from the site into hashes/<hash>.
+    const site = await mkdtemp(path.join(tmpdir(), "webcat-site-"));
+    await writeFile(path.join(site, "404.html"), "<h1>not found</h1>");
+    const fallbackHash = toBase64Url(createHash("sha256").update("<h1>not found</h1>").digest());
+    const { app: _app, default_index: _index, default_fallback: _fallback, ...rest } = bundle.manifest;
+    const versioned = { manifest: { ...rest, manifest_schema: 1, version: "1.0.0", fallback_hashes: [fallbackHash] }, signatures: bundle.signatures };
+    await expect(publishBundle(dir, enrollment, versioned)).resolves.not.toContain(expect.stringContaining("hashes/"));
+    expect(await checkHistory(dir)).toEqual([expect.stringContaining(`lists fallback ${fallbackHash} but hashes/${fallbackHash} is missing`)]);
+    const withFallback = await publishBundle(dir, enrollment, versioned, site);
+    expect(withFallback.map((f) => path.relative(dir, f))).toContain(path.join("hashes", fallbackHash));
+    expect(await checkHistory(dir)).toEqual([]);
+    await writeFile(path.join(dir, "hashes", fallbackHash), "tampered");
+    expect(await checkHistory(dir)).toEqual([expect.stringMatching(/^hashes\/.*: content hashes to .* not to its name$/)]);
+    await rm(path.join(dir, "hashes"), { recursive: true, force: true });
+    await publishBundle(dir, enrollment, document);
+    expect(await writeOnce(dir, enrollmentFileName(enrollment), "different\n").catch((e) => e.message)).toContain("must not change");
+    git("add", "."); git("commit", "-q", "-m", "first");
+    // A new enrollment: the old bundle becomes bundle-prev.json; the old hash files stay.
+    const changed = { ...enrollment, max_age: enrollment.max_age - 1 };
+    await publishEnrollment(dir, changed);
+    const written2 = await publishBundle(dir, changed, document);
+    expect(written2.map((f) => path.basename(f))).toContain("bundle-prev.json");
+    expect(await checkHistory(dir, "HEAD")).toEqual([]);
+    // Editing or deleting a hash-named file is caught against the ref and by the name check.
+    await writeFile(path.join(dir, enrollmentFileName(enrollment)), JSON.stringify({ ...enrollment, max_age: 5 }));
+    await rm(path.join(dir, manifestFileName(enrollment, document)));
+    const problems = await checkHistory(dir, "HEAD");
+    expect(problems.join("\n")).toMatch(/content hashes to .* not to its name/);
+    expect(problems.join("\n")).toMatch(/modified since HEAD/);
+    expect(problems.join("\n")).toMatch(/deleted since HEAD/);
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("inherits the previous release's history from its archive after checking it", async () => {
+    const { archiveRelease, checkHistory, enrollmentFileName, inheritHistory, manifestFileName, publishBundle, publishEnrollment, tar } = await import("../src/history");
+    const { createServer } = await import("node:http");
+    const { execFileSync } = await import("node:child_process");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const content = "<h1>release 1</h1>";
+    const document = { manifest: { ...bundle.manifest, files: { "/index.html": toBase64Url(createHash("sha256").update(content).digest()) } }, signatures: bundle.signatures };
+    // Release 1 as deployed: the web root with the well-known directory inside, archived the way release does.
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-prev-"));
+    const site = path.join(repo, "dist");
+    await mkdir(site);
+    await writeFile(path.join(site, "index.html"), content);
+    const wellKnown = path.join(repo, ".well-known/webcat");
+    await publishEnrollment(wellKnown, enrollment);
+    await publishBundle(wellKnown, enrollment, document);
+    const archives = await mkdtemp(path.join(tmpdir(), "webcat-archives-"));
+    await archiveRelease(path.join(archives, "good.tgz"), site, wellKnown);
+    expect(execFileSync("tar", ["-tzf", path.join(archives, "good.tgz")], { encoding: "utf8" })).toMatch(/^\.\/index\.html$/m);
+    expect(execFileSync("tar", ["-tzf", path.join(archives, "good.tgz")], { encoding: "utf8" })).toMatch(/^\.well-known\/webcat\/bundle\.json$/m);
+    await writeFile(path.join(site, "index.html"), "<h1>tampered</h1>");
+    await archiveRelease(path.join(archives, "bad.tgz"), site, wellKnown);
+    const server = createServer(async (req, res) => {
+      try {
+        res.end(await readFile(path.join(archives, path.basename(req.url ?? ""))));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const next = path.join(await mkdtemp(path.join(tmpdir(), "webcat-next-")), ".well-known/webcat");
+      const written = await inheritHistory(next, `${base}/good.tgz`);
+      expect(written.map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect(await checkHistory(next)).toEqual([]);
+      // Inheriting again only refreshes the pointer; hash-named files are already there.
+      expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
+      // An archive whose files do not match the manifest it ships is refused, and so is a missing one.
+      await expect(inheritHistory(next, `${base}/bad.tgz`)).rejects.toThrow(/does not hash as the manifest/);
+      await expect(inheritHistory(next, `${base}/missing.tgz`)).rejects.toThrow(/HTTP 404/);
+      // tar is the same runner release uses for both directions.
+      await expect(tar(["-tzf", path.join(archives, "nope.tgz")])).rejects.toThrow(/failed to run tar/);
+    } finally {
+      server.close();
+    }
   });
 });
 

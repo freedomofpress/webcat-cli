@@ -85,29 +85,7 @@ webcat init --type sigstore \
   --issuer https://token.actions.githubusercontent.com
 ```
 
-Then have that workflow call the CLI directly. The `id-token` permission is what lets the job
-obtain a Sigstore certificate for its identity:
-
-```yaml
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci && npm run build                      # produces dist/
-      - run: npm install -g @freedomofpress/webcat-cli
-      - run: webcat manifest generate --type sigstore -d dist -o manifest.json
-      - run: webcat manifest sign --type sigstore -o manifest.signed.json
-      - run: webcat bundle create -o dist/.well-known/webcat/bundle.json
-      - run: cp .well-known/webcat/enrollment.json dist/.well-known/webcat/
-      # deploy dist/ as usual; keep the previous bundle.json as bundle-prev.json across enrollment changes
-```
+Then have that workflow run `webcat release` on every tag; see [Releasing from CI](#releasing-from-ci).
 
 `manifest sign` checks the enrollment before requesting a certificate and fails the job with
 exit 2 if the enrollment's pinned trusted root can no longer verify new signatures. When that
@@ -256,11 +234,10 @@ nothing to run on purpose: the commands a release already goes through migrate a
 - `manifest generate` writes schema 1 from the same `webcat.config.json`; `manifest sign`
   migrates an unsigned schema 0 manifest before signing. Either verifies under the existing
   enrollment, old or new.
-- `bundle create` writes the enrollment as schema 1 (no `cas_url`). Nothing signatures depend on
-  changes, so the signed manifest keeps verifying and no re-signing is needed. The hash does
-  change: when the previous bundle at the output path carries another enrollment it is kept as
-  `bundle-prev.json` next to it, so serve both and run `enrollment submit <domain>` for the chain
-  to record the new hash.
+- `bundle create` (and so `release`) writes the enrollment as schema 1 (no `cas_url`). Nothing
+  signatures depend on changes, so the signed manifest keeps verifying and no re-signing is
+  needed. The hash does change: the previous bundle is kept as `bundle-prev.json`, so serve both
+  and run `enrollment submit <domain>` for the chain to record the new hash.
 
 ### Submitting and checking an enrollment
 
@@ -421,13 +398,137 @@ Errors are printed to stderr as `Error: <message>`. Messages name the CLI flag (
 
 ## Bundle helpers
 
-Use `bundle create` to combine an enrollment and a manifest (with signatures) into a WEBCAT bundle that can be distributed to verifiers:
+`bundle create` publishes a signed manifest into the well-known directory: `bundle.json`, the
+hash-named manifest file, each fallback under `hashes/`, and the previous bundle as
+`bundle-prev.json` when the enrollment changed. With `-o` it only writes the bundle:
 
 ```sh
-webcat bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
+webcat bundle create -e examples/enrollment.json -m examples/manifest.json -o bundle.json
 ```
 
-The resulting `bundle.json` matches the fixture located in `examples/bundle.json`.
+### History and releases
+
+`.well-known/webcat/` is the site's append-only history and the directory auditors read
+([spec, server.md section 1](https://github.com/freedomofpress/webcat-spec)). The CLI writes
+into it and never rewrites a hash-named file:
+
+| File | Written by |
+|------|-----------|
+| `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o` |
+| `bundle.json`, `manifest.sigsum.<checksum>.json` or `manifest.sigstore.<hash>.json` | `bundle create` |
+| `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle |
+| `hashes/<hash>` | `bundle create`, one per `fallback_hashes` entry, copied from the built site (`--directory`, or `directory` in the config) |
+
+The history travels with the releases, not with git. The archive `release` writes, the one the
+`artifact` URL serves for the version, is the web root with `.well-known/webcat/` inside. The
+next `release` downloads the archive of the previous tag, checks every file in it against the
+manifest it ships and every hash-named file against its name, and only then copies the
+directory in and adds the new release on top. Each release thereby proves the previous one was
+what it claimed before building on it, and a single archive carries the whole history. A
+missing or mismatching archive stops the release; `--no-history` overrides, and loses
+everything before this release for every later one. `history inherit <archive-url>` does the
+same step on its own.
+
+Sites that prefer to keep the directory in the repository can: `release --commit` and
+`bundle create --commit` commit the written files, and `history check [ref]` verifies that every
+hash-named file hashes to its name, that the current pointers match them, that every fallback
+the manifest lists is under `hashes/`, and that nothing was modified or deleted since `ref`.
+
+When `webcat.config.json` sets `source`, the manifest claims the files build from that
+repository at tag `version`: `manifest generate` requires HEAD to be that tag and `manifest sign`
+requires a clean working tree (`--skip-git-checks` overrides both). Without `version` in the
+config, the tag at HEAD is the version.
+
+## Releasing from CI
+
+A release is a tag. Work lands on branches as usual; when a commit is tagged, CI checks it out,
+builds the site, runs `webcat release`, uploads the archive where the `artifact` URL resolves
+and deploys the build directory with `.well-known/webcat/` inside. Nothing is pushed back to
+the repository, so the job needs no write access to it. Two things the checkout must provide:
+the tag at HEAD, which is the version, and the previous tag, from which the history is inherited,
+so the clone must not be shallow.
+
+`artifact` in `webcat.config.json` names where each release's archive lives, for example
+`https://github.com/acme/site/releases/download/${version}/site-${version}.tar.gz`;
+`release` writes `site-<version>.tar.gz` in the working directory for the job to upload.
+
+#### GitHub Actions, Sigstore
+
+The job signs with its own identity; the `id-token` permission is what lets it obtain a
+certificate. Enroll with that identity as shown [above](#choosing-sigstore).
+
+```yaml
+# .github/workflows/release.yml
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # to upload the archive to the GitHub release
+      id-token: write     # Sigstore identity
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build                          # produces dist/
+      - run: npm install -g @freedomofpress/webcat-cli
+      - run: webcat release --type sigstore
+      - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: cp -r .well-known dist/
+      # deploy dist/ as usual
+```
+
+#### Forgejo Actions, Sigsum
+
+Sigsum signs with a key, so the job holds one as a secret, and production logs want the
+rate-limit token key too (`init` generates both under `keys/`). Every signature the key makes
+is public in the Sigsum logs; that, not the secrecy of the CI runner, is what keeps a stolen
+key from going unnoticed. `manifest sign` needs `sigsum-submit` on the path.
+
+```yaml
+# .forgejo/workflows/release.yml
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: docker
+    container:
+      image: node:22
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: https://code.forgejo.org/actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - run: npm ci && npm run build                          # produces dist/
+      - run: npm install -g @freedomofpress/webcat-cli
+      - run: |
+          install -m 600 /dev/stdin keys/key1 <<< "$SIGSUM_KEY"
+          install -m 600 /dev/stdin keys/token <<< "$SIGSUM_TOKEN_KEY"
+        env:
+          SIGSUM_KEY: ${{ secrets.SIGSUM_KEY }}
+          SIGSUM_TOKEN_KEY: ${{ secrets.SIGSUM_TOKEN_KEY }}
+      - run: webcat release -k keys/key1 --token-signing-key keys/token --token-domain example.org
+      - run: mkdir release && mv site-*.tar.gz release/
+      - uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          release-dir: release
+      - run: cp -r .well-known dist/
+      # deploy dist/ as usual
+```
 
 ## End-to-end example (based on `demo.sh`)
 
@@ -507,11 +608,12 @@ or a JSON equivalent) matching the schema below:
 | --- | --- | --- |
 | `source` | string | Optional. Git repository URL the site is built from; `version` must be a tag there. Auditors rebuild from it. |
 | `artifact` | string | Optional. Release archive URL template containing `${version}`; auditors fetch it. |
-| `version` | string | Semantic version of this release, such as `1.4.0`; a leading `v` is tolerated. |
+| `version` | string | Semantic version of this release, such as `1.4.0`; a leading `v` is tolerated. Optional: without it the git tag at HEAD is the version. |
+| `directory` | string | Optional. Where the build writes the site; `release` and `bundle create` read it. |
 | `app` | string | Deprecated and ignored: manifests no longer carry it. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Optional, `index.html`. The file a directory path stands for: `/docs/` gets the hash of `/docs/index.html`. |
-| `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `manifest generate`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |
+| `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `bundle create`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |
 | `wasm` | string[] | Optional list of base64url SHA-256 digests for inline WebAssembly modules. `.wasm` files are added automatically during generation. |
 | `extra_csp` | Record<string, string> | Optional per-path CSP overrides; keys must start with `/`. | `{}` or `{ "/app": "default-src 'none'" }` |
 

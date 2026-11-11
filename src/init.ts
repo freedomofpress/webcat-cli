@@ -7,6 +7,8 @@ import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
+import { gitRemote, gitTagAtHead } from "./git.js";
+import { WELL_KNOWN_DIR, publishEnrollment } from "./history.js";
 import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
 import { causeOf, invalid, log, readText, validateAll } from "./utils.js";
 
@@ -51,6 +53,9 @@ export interface InitOptions {
   identity?: string;
   issuer?: string;
   keepRekorV1?: boolean; // leave rekor.sigstore.dev in the Sigstore trusted root
+  source?: string; // git repository URL; "" for closed source
+  artifact?: string; // release archive URL template with ${version}
+  directory?: string; // where the built site lives
   dir: string;
 }
 
@@ -127,7 +132,11 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
   };
   try {
     const origin = options.origin ?? (await ask("origin", "What is the public URL of your site? Give the origin, in the form https://example.org", undefined, httpsOrigin));
-    const version = options.version ?? (await ask("app-version", "Which version of your site are you publishing?", "1.0.0"));
+    // git answers first: the remote is the source, the tag at HEAD is the version.
+    const source = options.source ?? (await ask("source", "Which git repository is the site built from? Auditors rebuild from it; leave empty for closed source", (await gitRemote(options.dir)) ?? ""));
+    const artifact = options.artifact ?? (await ask("artifact", "Where will each release archive live? A URL template with ${version}; leave empty for none", ""));
+    const version = options.version ?? (await ask("app-version", "Which version of your site are you publishing? A git tag when source is set", (await gitTagAtHead(options.dir)) ?? "1.0.0"));
+    const directory = options.directory ?? (await ask("directory", "Which directory does your build write the site into?", "dist"));
     const type = (options.type ??
       (await choose("type", "Which signing mechanism do you want to use?", [["sigsum", "you hold the signing keys"], ["sigstore", "sign from CI with an OIDC identity"]], "sigsum"))) as "sigsum" | "sigstore";
     let csp = options.csp;
@@ -157,7 +166,7 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
       rest.identity ??= await ask("identity", "Which identity signs your releases? An email, or a GitHub workflow URL such as https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main");
       rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
     }
-    return { ...rest, origin, version, type, csp, maxAge };
+    return { ...rest, origin, version, type, csp, maxAge, source, artifact, directory };
   } finally {
     rl?.close();
   }
@@ -213,24 +222,37 @@ export async function runInit(options: InitOptions): Promise<void> {
           maxAge: a.maxAge,
         });
 
-  const config = { version: a.version, default_csp: a.csp, default_index: "index.html", fallbacks: ["/index.html"], wasm: [], extra_csp: {} };
+  // With a source repository the release tag is the version, so the config does not pin one unless asked to.
+  const config = {
+    ...(a.source ? { source: a.source } : {}),
+    ...(a.artifact ? { artifact: a.artifact } : {}),
+    ...(!a.source || options.version !== undefined ? { version: a.version } : {}),
+    directory: a.directory,
+    default_csp: a.csp,
+    default_index: "index.html",
+    fallbacks: ["/index.html"],
+    wasm: [],
+    extra_csp: {},
+  };
+  if (!a.source && !a.artifact) log("Warning: without source or artifact, auditors cannot reproduce or fetch this site's releases");
   const files: Array<[string, string]> = [
     ["webcat.config.json", JSON.stringify(config, null, 2) + "\n"],
     ...(a.type === "sigsum" ? [["trust_policy", policyText] as [string, string]] : []),
-    [".well-known/webcat/enrollment.json", JSON.stringify(enrollment, null, 2) + "\n"],
   ];
-  await mkdir(`${a.dir}/.well-known/webcat`, { recursive: true });
   for (const [name, contents] of files) {
     await writeFile(`${a.dir}/${name}`, contents);
     log(`wrote ${name}`);
   }
+  for (const file of await publishEnrollment(`${a.dir}/${WELL_KNOWN_DIR}`, enrollment)) {
+    log(`wrote ${path.relative(a.dir, file)}`);
+  }
   const host = new URL(a.origin).host;
   const key = keyPaths[0] ?? (a.signer ?? []).find((s) => s.endsWith(".pub")) ?? "<private key, or .pub for ssh-agent>";
   const token = tokenHex ? ` --token-signing-key keys/token --token-domain ${host}` : "";
-  const sign =
+  const release =
     a.type === "sigsum"
-      ? `webcat manifest sign -k ${key}${token} -o manifest.signed.json      # repeat with each key up to the threshold`
-      : "webcat manifest sign --type sigstore -o manifest.signed.json  # in CI with the identity above, or --interactive";
+      ? `webcat release -k ${key}${token}      # repeat -k for each key up to the threshold`
+      : "webcat release --type sigstore         # in CI with the identity above, or --interactive";
   const dns = tokenHex
     ? `
   0. Publish this DNS record so the production logs accept your submissions:
@@ -238,14 +260,14 @@ export async function runInit(options: InitOptions): Promise<void> {
     : "";
   stdout.write(`
 Next steps${dns}
-  1. Serve the .well-known/webcat/ directory at ${a.origin}/.well-known/webcat/
+  1. Serve ${WELL_KNOWN_DIR}/ at ${a.origin}/${WELL_KNOWN_DIR}/
   2. Send this header on every response, byte for byte:
        Content-Security-Policy: ${a.csp}
-  3. Build the site, then generate, sign and bundle the manifest:
-       webcat manifest generate${a.type === "sigsum" ? "" : " --type sigstore"} -d <build dir> -o manifest.json      # <build dir>: the directory you serve, . if it is this one
-       ${sign}
-       webcat bundle create -o .well-known/webcat/bundle.json
-  4. Deploy, then check what visitors will see:   webcat site check ${host}
+  3. Build the site into ${a.directory}/, tag the release, then publish it in one step:
+       ${release}
+     (generates, signs, writes bundle.json and manifest.<type>.<hash>.json${a.artifact ? ", the release archive" : ""}; the history is kept in the archive of each release)
+  4. Deploy with ${WELL_KNOWN_DIR}/ copied into the web root, then check what visitors and auditors will see:
+       webcat site check ${host}
   5. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}
   6. Follow promotion on the chain:               webcat enrollment status ${host}
 `);

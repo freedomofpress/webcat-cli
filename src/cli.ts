@@ -1,12 +1,16 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
-import { hasSchema } from "@freedomofpress/webcat/webcat/canonicalize";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { hasSchema } from "@freedomofpress/webcat/webcat/canonicalize";
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
-import { publishManifestToCas, writeCasObject } from "./cas.js";
+import { publishManifestToCas } from "./cas.js";
+import { gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead, gitTagExists } from "./git.js";
+import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
   ManifestDocument,
   buildManifest,
@@ -16,10 +20,9 @@ import {
   loadManifestDocument,
   manifestHash,
   scanDirectory,
-  writeFallbackCopies,
   migrateManifest,
 } from "./manifest.js";
-import { describeValidity, loadBundleDocument, verifyBundle, parseBundleObject } from "./bundle.js";
+import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
 import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
 import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
 import { checkSite } from "./site.js";
@@ -87,6 +90,13 @@ function requireOption<T>(value: T | undefined, flag: string, context: string): 
   }
   return value;
 }
+// Writes are staged in git when inside a repository (or committed on request); never silently.
+async function stageInGit(paths: string[], git: boolean | undefined, commitMessage?: string): Promise<void> {
+  if (git === false || !(await gitRoot())) return;
+  await gitStage(paths, commitMessage);
+  log(commitMessage ? `committed: ${commitMessage}` : `staged in git: ${paths.map((f) => path.relative(process.cwd(), f)).join(", ")}`);
+}
+
 // Reports every missing flag at once.
 const requireOptions = (context: string, ...flags: Array<[value: unknown, flag: string]>): void =>
   validateAll(flags.map(([value, flag]) => () => requireOption(value, flag, context)));
@@ -125,7 +135,10 @@ program
   .description("Set up a site for WEBCAT: writes webcat.config.json, trust_policy and .well-known/webcat/enrollment.json, then prints the next steps")
   .option("--origin <url>", "Site origin, e.g. https://example.org")
   .option("--keep-rekor-v1", `Keep ${DEFAULT_REKOR_URL} (Rekor v1) in the Sigstore trusted root instead of distrusting it`)
-  .option("--app-version <string>", "Version string for this release (default: 1.0.0)")
+  .option("--app-version <string>", "Version of this release (default: the git tag at HEAD, else 1.0.0)")
+  .option("--source <url>", "Git repository the site is built from (default: the origin remote); empty for closed source")
+  .option("--artifact <url>", "Release archive URL template containing ${version}; empty if none")
+  .option("--directory <path>", "Directory the build writes the site into (default: dist)")
   .addOption(typeOption("Enrollment"))
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
   .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
@@ -212,7 +225,8 @@ const enrollmentCreate = enrollment
   .description("Create an enrollment definition")
   .addOption(typeOption("Enrollment"))
   .option("-m, --max-age <seconds>", "Maximum age in seconds")
-  .option("-o, --output <path>", "Write result to file instead of stdout")
+  .option("-o, --output <path>", "Write result to file instead of stdout, with its hash-named copy next to it")
+  .option("--no-git", "Do not stage the written files in git")
   .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
   .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
@@ -280,10 +294,15 @@ enrollmentCreate.action(async (options) => {
     enrollmentObject = await buildEnrollmentObject({ type: "sigstore", trustedRoot, claims, maxAge: options.maxAge });
   }
 
-  const json = JSON.stringify(enrollmentObject, null, 2);
-  const { hash, filePath } = await writeCasObject(json);
-  log(`Saved enrollment to ${filePath} (sha256=${hash}).`);
+  const json = JSON.stringify(enrollmentObject, null, 2) + "\n";
   await writeOutput(options.output, json);
+  if (options.output) {
+    // The hash-named copy lives next to the enrollment: the history auditors read (spec server.md section 1).
+    const dir = path.dirname(options.output);
+    const name = enrollmentFileName(enrollmentObject);
+    log(`${(await writeOnce(dir, name, json)) ? "wrote" : "already present"} ${path.join(dir, name)}`);
+    await stageInGit([options.output, path.join(dir, name)], options.git);
+  }
 });
 
 enrollment
@@ -418,6 +437,7 @@ manifest
   .option("-p, --policy-file <path>", "Sigsum policy file for timestamps", "trust_policy")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
+  .option("--skip-git-checks", "Do not require version to be the tag at HEAD when source is set")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
     const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
@@ -426,11 +446,20 @@ manifest
       scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles, excludePaths: [...(options.exclude ?? []), ...insideDirectory(options.directory, options.config, options.output)] }),
       policyFile ? readText(policyFile, "policy").then(fetchTimestampFromPolicy) : undefined,
     ]);
-    const document: ManifestDocument = { manifest: buildManifest(config, scan, timestamp) };
+    // With no version in the config, the release is whatever tag HEAD carries.
+    const tagAtHead = (await gitRoot()) ? await gitTagAtHead() : null;
+    const version = config.version ?? tagAtHead;
+    if (!version) throw invalid("config.version is required: set it in webcat.config.json, or tag the commit being released");
+    if (config.source && !options.skipGitChecks && tagAtHead !== version && (await gitRoot())) {
+      // A manifest with source claims the files build from the repository at tag `version`: HEAD must be that tag.
+      const exists = await gitTagExists(version);
+      throw invalid(
+        `config.version ${version} must be the git tag at HEAD because config.source is set (HEAD is ${tagAtHead ? `tagged ${tagAtHead}` : "not tagged"}${exists ? "" : `, and no tag ${version} exists`}); tag the release or pass --skip-git-checks`,
+      );
+    }
+    const document: ManifestDocument = { manifest: buildManifest({ ...config, version }, scan, timestamp) };
     const unserved = Object.keys(document.manifest.files).filter(isHostOnlyFile);
     if (unserved.length) log(`Warning: hosts usually do not serve ${unserved.join(", ")}; exclude with ${unserved.map((p) => `--exclude ${p.slice(1)}`).join(" ")}`);
-    if (!config.fallbacks.length) log("Warning: no fallbacks; extensions before 3.2.0 reject a manifest without default_fallback");
-    for (const written of await writeFallbackCopies(options.directory, config, document.manifest)) log(`wrote ${written}`);
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
 
@@ -460,9 +489,16 @@ manifest
   .option("--oidc-token <value>", "Explicit OIDC ID token to use for Sigstore signing")
   .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
   .option("--no-open-browser", "Do not open a browser window for device authorization")
+  .option("--skip-git-checks", "Sign even with uncommitted changes when the manifest has source")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(async (options, command: Command) => {
     const document = await loadManifestDocument(options.input);
+    if (document.manifest.source && !options.skipGitChecks && (await gitRoot())) {
+      const dirty = await gitDirtyFiles();
+      if (dirty.length) {
+        throw invalid(`the working tree has uncommitted changes and the manifest has source; commit or stash first (or pass --skip-git-checks):\n  - ${dirty.join("\n  - ")}`);
+      }
+    }
     const signed = Array.isArray(document.signatures) ? document.signatures.length : Object.keys(document.signatures ?? {}).length;
     if (!hasSchema(document.manifest)) {
       if (signed) {
@@ -647,27 +683,122 @@ program
   .command("bundle")
   .description("Combine an enrollment and a signed manifest into a bundle")
   .command("create")
-  .description("Create a bundle from enrollment and a signed manifest")
-  .option("-e, --enrollment <path>", "Enrollment JSON file", ".well-known/webcat/enrollment.json")
+  .description("Publish a signed manifest: bundle.json and the hash-named manifest file into the well-known directory, fallbacks under hashes/, the previous bundle kept when the enrollment changed")
+  .option("-e, --enrollment <path>", "Enrollment JSON file", `${WELL_KNOWN_DIR}/enrollment.json`)
   .option("-m, --manifest <path>", "Signed manifest JSON file", "manifest.signed.json")
-  .option("-o, --output <path>", "Write bundle JSON to a file")
+  .option("-d, --dir <path>", "Well-known directory to publish into", WELL_KNOWN_DIR)
+  .option("--directory <path>", "Built site directory, to publish the manifest's fallback documents under hashes/ (default: config.directory in webcat.config.json)")
+  .option("--commit", "Commit the written files")
+  .option("--no-git", "Do not stage the written files in git")
+  .option("-o, --output <path>", "Only write the bundle to this file (no history files)")
   .action(async (options) => {
     const [current, document] = await Promise.all([loadEnrollment(options.enrollment), loadManifestDocument(options.manifest)]);
     // The served enrollment migrates to schema 1 here; the chain learns the new hash from enrollment submit.
     const enrollment = migrateEnrollment(current);
     if (enrollment !== current) log(`migrated ${options.enrollment} to schema 1 (spec server.md): run enrollment submit <domain> once this bundle is served`);
     if (options.output) {
-      // A bundle served with another enrollment stays reachable as bundle-prev.json until the chain records the new hash.
-      const previousText = await readFile(options.output, "utf8").catch(() => null);
-      const previous = previousText === null ? null : parseBundleObject(JSON.parse(previousText));
-      if (previous && previousText && enrollmentHashHex(parseEnrollmentObject(previous.enrollment)) !== enrollmentHashHex(enrollment)) {
-        const prevPath = path.join(path.dirname(options.output), "bundle-prev.json");
-        await writeFile(prevPath, previousText);
-        log(`kept the current ${options.output} as ${prevPath}: its enrollment differs, serve both until the chain records the new one`);
+      await writeOutput(options.output, JSON.stringify({ enrollment, manifest: document.manifest, signatures: document.signatures }, null, 2));
+      return;
+    }
+    const siteDirectory: string | undefined = options.directory ?? (await loadManifestConfig("webcat.config.json").then((c) => c.directory, () => undefined));
+    const written = await publishBundle(options.dir, enrollment, document, siteDirectory);
+    written.forEach((f) => log(`wrote ${f}`));
+    await stageInGit(written, options.git, options.commit ? `webcat: publish manifest ${document.manifest.version}` : undefined);
+  });
+
+// ---------------------------------------------------------------------------
+// release
+
+// One step for the common case: the tag at HEAD is the version, the config knows the build directory.
+// Runs the granular commands as subprocesses so every flag and exit code behaves exactly as documented.
+program
+  .command("release")
+  .description("Release the version HEAD is tagged with: inherit the history from the previous release's archive, generate, sign and bundle the manifest, write the new archive")
+  .option("-d, --directory <path>", "Directory with the built site (default: config.directory)")
+  .addOption(typeOption("Signature"))
+  .option("-k, --key <path>", "Sigsum signing key, repeatable up to the threshold (private key, or .pub held in ssh-agent)", collect)
+  .option("--token-signing-key <path>", "Rate-limit token key for production Sigsum logs")
+  .option("--token-domain <domain>", "Domain for Sigsum rate limiting")
+  .option("--oidc-token <value>", "Explicit OIDC token for Sigstore signing")
+  .option("--interactive", "OIDC device flow for Sigstore signing")
+  .option("--no-archive", "Do not write the release archive even when the config has artifact")
+  .option("--no-history", "Do not inherit the well-known directory from the previous release's archive")
+  .option("--commit", "Commit the published files (by default git is not touched)")
+  .option("--skip-git-checks", "Skip the tag-at-HEAD and clean-tree checks")
+  .action(async (options) => {
+    const config = await loadManifestConfig("webcat.config.json");
+    const directory = options.directory ?? config.directory;
+    if (!directory) throw invalid("--directory is required (or set directory in webcat.config.json)");
+    if (options.type === "sigsum") requireOption(options.key, "--key", "a sigsum release");
+    const version = config.version ?? (await gitTagAtHead());
+    const archive = options.archive && config.artifact && version ? path.basename(config.artifact.replace(/\$\{version\}/g, version)) : undefined;
+    const run = (...args: string[]) =>
+      new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, [...process.execArgv, process.argv[1], ...args], { stdio: "inherit" });
+        child.on("exit", (code) => (code === 0 ? resolve() : reject(new CliError(`release stopped at: webcat ${args.join(" ")}`, code === 3 ? 3 : 2))));
+      });
+    const work = await mkdtemp(path.join(tmpdir(), "webcat-release-"));
+    const skip = options.skipGitChecks ? ["--skip-git-checks"] : [];
+    const unsigned = path.join(work, "manifest.json");
+    const signed = path.join(work, "manifest.signed.json");
+    await run("manifest", "generate", "--type", options.type, "-d", directory, "-o", unsigned, ...skip);
+    if (options.type === "sigsum") {
+      let input = unsigned;
+      for (const key of options.key as string[]) {
+        const token = options.tokenSigningKey && options.tokenDomain ? ["--token-signing-key", options.tokenSigningKey, "--token-domain", options.tokenDomain] : [];
+        await run("manifest", "sign", "-i", input, "-k", key, ...token, "-o", signed, ...skip);
+        input = signed;
+      }
+    } else {
+      const auth = options.oidcToken ? ["--oidc-token", options.oidcToken] : options.interactive ? ["--interactive"] : [];
+      await run("manifest", "sign", "--type", "sigstore", "-i", unsigned, ...auth, "-o", signed, ...skip);
+    }
+    // The previous release's archive carries the history up to it; this release adds its own files on top.
+    if (options.history && config.artifact) {
+      const previous = await gitPreviousTag();
+      if (previous) {
+        const inherited = await inheritHistory(WELL_KNOWN_DIR, config.artifact.replace(/\$\{version\}/g, previous));
+        log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from release ${previous}`);
+      } else {
+        log("No previous tag: this release starts the history");
       }
     }
-    const bundleDocument = { enrollment, manifest: document.manifest, signatures: document.signatures };
-    await writeOutput(options.output, JSON.stringify(bundleDocument, null, 2));
+    await run("bundle", "create", "-m", signed, "--directory", directory, options.commit ? "--commit" : "--no-git");
+    if (archive) {
+      await archiveRelease(archive, directory, WELL_KNOWN_DIR);
+      log(`wrote ${archive}; publish it where ${config.artifact} resolves for version ${version}`);
+    }
+    await rm(work, { recursive: true, force: true });
+    log(`Released ${version ?? "(unversioned)"}. Left to do: ${archive ? `upload ${archive}, ` : ""}deploy ${directory} with ${WELL_KNOWN_DIR}/ in the web root`);
+  });
+
+// ---------------------------------------------------------------------------
+// history
+
+const history = program.command("history").description("The well-known directory as an append-only ledger");
+history
+  .command("inherit")
+  .description("Copy the well-known directory out of a previous release's archive after checking it against the manifest it ships (release does this for the previous tag)")
+  .argument("<archive-url>", "The previous release archive, where the artifact template resolves for its version")
+  .option("-d, --dir <path>", "Well-known directory", WELL_KNOWN_DIR)
+  .action(async (url: string, options) => {
+    const written = await inheritHistory(options.dir, url);
+    written.forEach((f) => log(`wrote ${f}`));
+  });
+history
+  .command("check")
+  .description("Check every hash-named file hashes to its name, the current pointers match them, and nothing was modified or deleted since a git ref (exit 1 on problems)")
+  .argument("[ref]", "Git ref to compare against (e.g. HEAD, origin/main); default: no git comparison")
+  .option("-d, --dir <path>", "Well-known directory", WELL_KNOWN_DIR)
+  .action(async (ref: string | undefined, options) => {
+    const problems = await checkHistory(options.dir, ref);
+    if (problems.length === 0) {
+      process.stdout.write(`OK: ${options.dir} is consistent${ref ? ` and append-only since ${ref}` : ""}\n`);
+      return;
+    }
+    process.stdout.write(`${problems.length} problem${problems.length > 1 ? "s" : ""} in ${options.dir}:\n`);
+    problems.forEach((f) => process.stdout.write(`  - ${f}\n`));
+    process.exitCode = 1;
   });
 
 // Exit codes: 0 ok, 1 negative verification result, 2 invalid input or usage, 3 external failure (see utils.ts).

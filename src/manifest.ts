@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { SerializedBundle } from "@sigstore/bundle";
 import type { Manifest, SigsumSignatures } from "@freedomofpress/webcat/webcat/interfaces/bundle";
@@ -8,7 +8,9 @@ import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url, v
 
 export type ManifestContent = Manifest;
 // What webcat.config.json holds: fallbacks are paths here and hashes in the manifest. app is accepted and ignored.
-export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "manifest_schema" | "default_index" | "default_fallback" | "fallback_hashes"> & {
+export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "version" | "manifest_schema" | "default_index" | "default_fallback" | "fallback_hashes"> & {
+  version?: string; // absent when the release tag at HEAD is the version
+  directory?: string; // where the built site lives (CLI-only, never in the manifest)
   default_index: string;
   fallbacks: string[];
 };
@@ -16,7 +18,7 @@ export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "mani
 // Spec manifest.md: a schema 1 manifest's version is a semantic version; a leading v (git tags) is tolerated.
 const SEMVER = /^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
-// Where each fallback is published under its hash, so auditors can find what the manifest accepts.
+// Where each fallback is served under its hash (bundle create publishes them), so auditors can find what the manifest accepts.
 export const HASHES_PATH = "/.well-known/webcat/hashes/";
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
@@ -105,8 +107,8 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   const fallbacks = c.fallbacks ?? (c.default_fallback === undefined ? [`/${String(c.default_index).replace(/^\/+/, "")}`] : [c.default_fallback]);
   const optional = (key: string): string | undefined => (c[key] === undefined ? undefined : str(key));
   validateAll([
-    ...["version", "default_csp", "default_index"].map((key) => () => str(key)),
-    ...["source", "artifact"].map((key) => () => optional(key)),
+    ...["default_csp", "default_index"].map((key) => () => str(key)),
+    ...["version", "source", "artifact", "directory"].map((key) => () => optional(key)),
     () => {
       if (!Array.isArray(fallbacks) || !fallbacks.every((f) => typeof f === "string" && f.startsWith("/"))) {
         throw invalid("config.fallbacks must be an array of '/'-prefixed paths");
@@ -127,7 +129,8 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   return {
     ...(c.source !== undefined ? { source: str("source") } : {}),
     ...(c.artifact !== undefined ? { artifact: str("artifact") } : {}),
-    version: str("version"),
+    ...(c.version !== undefined ? { version: str("version") } : {}),
+    ...(c.directory !== undefined ? { directory: str("directory") } : {}),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
     fallbacks: fallbacks as string[],
@@ -179,7 +182,7 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
 
 // A schema 1 manifest (spec manifest.md): directory keys and fallback_hashes, no app, default_index or
 // default_fallback, whatever schema the enrollment has. Extensions from 3.2.0 read it; 3.3.0 hashes it under JCS.
-export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
+export function buildManifest(config: ManifestConfig & { version: string }, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
   const files = Object.fromEntries(scan.files);
   const suffix = `/${config.default_index}`;
   for (const p of Object.keys(files)) {
@@ -207,18 +210,6 @@ export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult,
     }),
   );
   return manifest;
-}
-
-// Copies each fallback to <directory>/.well-known/webcat/hashes/<hash>; returns the paths written.
-export async function writeFallbackCopies(directory: string, config: ManifestConfig, manifest: ManifestContent): Promise<string[]> {
-  const written: string[] = [];
-  for (const p of config.fallbacks) {
-    const target = `${HASHES_PATH}${manifest.files[p]}`;
-    await mkdir(path.join(directory, HASHES_PATH), { recursive: true });
-    await copyFile(path.join(directory, p), path.join(directory, target));
-    written.push(target);
-  }
-  return written;
 }
 
 // The manifest as a 3.2.0 extension reads it: legacy default_index and default_fallback rewritten
