@@ -329,16 +329,16 @@ describe("manifest configuration", () => {
   it("builds manifests with the extension's rules", () => {
     const hash = toBase64Url(createHash("sha256").update("x").digest());
     const scan = { files: new Map([["/index.html", hash], ["/docs/index.html", "D".repeat(42) + "A"], ["/404.html", "E".repeat(42) + "A"]]), wasm: new Set<string>() };
-    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], wasm: [], extra_csp: {} };
+    const config = { version: "1.0.0", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], wasm: [], extra_csp: {} };
     const built = buildManifest(config, scan);
-    // Directory keys next to each index, the fallback as a hash, and the legacy fields for extensions before 3.2.0.
+    // Schema 1: directory keys next to each index, the fallback as a hash, none of the legacy fields.
     expect(Object.keys(built.files)).toEqual(["/", "/404.html", "/docs/", "/docs/index.html", "/index.html"]);
     expect(built.files["/"]).toBe(hash);
     expect(built.fallback_hashes).toEqual([scan.files.get("/404.html")]);
-    expect([built.default_index, built.default_fallback]).toEqual(["index.html", "/404.html"]);
-    // No fallbacks at all: nothing emitted for either generation.
-    const none = buildManifest({ ...config, fallbacks: [] }, scan);
-    expect([none.fallback_hashes, none.default_fallback]).toEqual([undefined, undefined]);
+    expect([built.manifest_schema, built.app, built.default_index, built.default_fallback]).toEqual([1, undefined, undefined, undefined]);
+    expect(buildManifest({ ...config, fallbacks: [] }, scan).fallback_hashes).toBeUndefined();
+    expect(buildManifest({ ...config, source: "https://github.com/o/r", artifact: "https://x/${version}.tgz" }, scan)).toMatchObject({ source: "https://github.com/o/r", artifact: "https://x/${version}.tgz" });
+    expect(() => buildManifest({ ...config, version: "1" }, scan)).toThrow("config.version must be a semantic version such as 1.4.0, got '1'");
     expect(() => buildManifest({ ...config, fallbacks: ["/missing.html"] }, scan)).toThrow("config.fallbacks must name scanned files, '/missing.html' was not found");
     expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
@@ -350,7 +350,7 @@ describe("manifest configuration", () => {
   it("reads old and new configs alike and publishes fallbacks under their hash", async () => {
     const { writeFallbackCopies } = await import("../src/manifest");
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-fallback-"));
-    const base = { app: "https://example.com", version: "1", default_csp: "default-src 'none'" };
+    const base = { app: "https://example.com", version: "1.0.0", default_csp: "default-src 'none'" };
     await writeFile(path.join(dir, "legacy.json"), JSON.stringify({ ...base, default_index: "/index.html", default_fallback: "/404.html" }));
     await writeFile(path.join(dir, "bare.json"), JSON.stringify(base));
     await writeFile(path.join(dir, "new.json"), JSON.stringify({ ...base, fallbacks: ["/404.html", "/index.html"] }));
@@ -583,7 +583,7 @@ describe("init", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-"));
     await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)], casUrl: "https://example.org/cas/" });
     const config = JSON.parse(await readFile(path.join(dir, "webcat.config.json"), "utf8"));
-    expect(config.app).toBe("https://example.org");
+    expect(config.app).toBeUndefined();
     expect(config.default_csp).toBe(CSP_PRESETS.static.csp);
     const enrollment = await loadEnrollment(path.join(dir, ".well-known/webcat/enrollment.json"));
     expect(enrollment.type).toBe("sigsum");

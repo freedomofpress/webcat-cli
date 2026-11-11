@@ -271,6 +271,12 @@ infrastructure.
 
 ## Manifest helpers
 
+`manifest generate` writes a schema 1 manifest (`manifest_schema: 1`, spec manifest.md): directory
+keys in `files`, `fallback_hashes`, optional `source` and `artifact`, and none of `app`,
+`default_index` or `default_fallback`. It is hashed under RFC 8785 (JCS), as extension 3.3.0 does,
+and verifies under any enrollment, schema 1 or older. Extensions from 3.2.0 accept it; older ones
+do not. Manifests without `manifest_schema` keep verifying under the OLPC hash they were signed with.
+
 The `manifest` namespace operates on WEBCAT manifests:
 
 | Command | Purpose |
@@ -434,7 +440,7 @@ EOF
 
 cat > webcat.config.json <<'EOF'
 {
-  "app": "https://github.com/element-hq/element-web",
+  "source": "https://github.com/element-hq/element-web",
   "version": "1.12.3",
   "default_csp": "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; img-src * blob: data:; connect-src * blob:; font-src 'self' data: ; media-src * blob: data:; child-src blob: data:; worker-src 'self'; frame-src blob: data:; form-action 'self'; manifest-src 'self'; frame-ancestors 'self'",
   "fallbacks": ["/error.html"],
@@ -487,8 +493,10 @@ or a JSON equivalent) matching the schema below:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `app` | string | Origin URL of the application being packaged. |
-| `version` | string | Git tag to be used for reproducibility and auditing. |
+| `source` | string | Optional. Git repository URL the site is built from; `version` must be a tag there. Auditors rebuild from it. |
+| `artifact` | string | Optional. Release archive URL template containing `${version}`; auditors fetch it. |
+| `version` | string | Semantic version of this release, such as `1.4.0`; a leading `v` is tolerated. |
+| `app` | string | Deprecated and ignored: manifests no longer carry it. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Optional, `index.html`. The file a directory path stands for: `/docs/` gets the hash of `/docs/index.html`. |
 | `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `manifest generate`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |

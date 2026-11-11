@@ -1,5 +1,5 @@
 import { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
-import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
+import { canonicalizeJCS } from "@freedomofpress/crypto-browser";
 import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
 import { parseCompiledPolicy } from "@freedomofpress/sigsum/dist/compiledPolicy.js";
 import {
@@ -70,11 +70,7 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
   if (e.type !== EnrollmentTypes.Sigsum && e.type !== EnrollmentTypes.Sigstore) {
     throw invalid("enrollment.type must be 'sigsum' or 'sigstore'; browsers reject enrollments without it");
   }
-  const encodable = () => {
-    if (canonicalize(e) === null) {
-      throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
-    }
-  };
+  const encodable = () => canonicalizeEnrollment(e as unknown as Enrollment);
   if (e.type === EnrollmentTypes.Sigstore) {
     const enrollment = e as unknown as SigstoreEnrollment;
     validateAll([
@@ -139,12 +135,13 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
 }
 
 // Same canonical form the oracles and the extension hash.
+// The extension hashes every enrollment under JCS (originstate.ts), whatever its schema.
 export function canonicalizeEnrollment(enrollment: Enrollment): string {
-  const canonical = canonicalize(enrollment);
-  if (canonical === null) {
-    throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
+  try {
+    return canonicalizeJCS(enrollment);
+  } catch (err) {
+    throw invalid(`enrollment must contain only strings, integers, booleans, null, arrays and objects: ${causeOf(err)}`);
   }
-  return canonical;
 }
 
 export const loadEnrollment = async (path: string): Promise<Enrollment> => parseEnrollmentObject(await readJson(path, "enrollment"));
