@@ -8,7 +8,7 @@ import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
-import { gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead, gitTagExists } from "./git.js";
+import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
   ManifestDocument,
@@ -433,7 +433,7 @@ manifest
   .option("-p, --policy-file <path>", "Sigsum policy file for timestamps", "trust_policy")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
-  .option("--skip-git-checks", "Do not require version to be the tag at HEAD when source is set")
+  .option("--skip-git-checks", "With source set, do not require version to be the tag at HEAD, on the source remote, and the tag this CI job runs for")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(async (options) => {
     const policyFile = options.type === "sigsum" ? options.policyFile : undefined;
@@ -446,13 +446,7 @@ manifest
     const tagAtHead = (await gitRoot()) ? await gitTagAtHead() : null;
     const version = config.version ?? tagAtHead;
     if (!version) throw invalid("config.version is required: set it in webcat.config.json, or tag the commit being released");
-    if (config.source && !options.skipGitChecks && tagAtHead !== version && (await gitRoot())) {
-      // A manifest with source claims the files build from the repository at tag `version`: HEAD must be that tag.
-      const exists = await gitTagExists(version);
-      throw invalid(
-        `config.version ${version} must be the git tag at HEAD because config.source is set (HEAD is ${tagAtHead ? `tagged ${tagAtHead}` : "not tagged"}${exists ? "" : `, and no tag ${version} exists`}); tag the release or pass --skip-git-checks`,
-      );
-    }
+    if (config.source && !options.skipGitChecks && (await gitRoot())) await assertReleaseTag(version, config.source);
     const document: ManifestDocument = { manifest: buildManifest({ ...config, version }, scan, timestamp) };
     const unserved = Object.keys(document.manifest.files).filter(isHostOnlyFile);
     if (unserved.length) log(`Warning: hosts usually do not serve ${unserved.join(", ")}; exclude with ${unserved.map((p) => `--exclude ${p.slice(1)}`).join(" ")}`);
@@ -485,11 +479,13 @@ manifest
   .option("--oidc-token <value>", "Explicit OIDC ID token to use for Sigstore signing")
   .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
   .option("--no-open-browser", "Do not open a browser window for device authorization")
-  .option("--skip-git-checks", "Sign even with uncommitted changes when the manifest has source")
+  .option("--skip-git-checks", "With source in the manifest, sign even with uncommitted changes, an untagged HEAD, or a tag missing from the source remote")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(async (options, command: Command) => {
     const document = await loadManifestDocument(options.input);
     if (document.manifest.source && !options.skipGitChecks && (await gitRoot())) {
+      // Nothing gets signed for a release that is not what the manifest claims (spec manifest.md).
+      await assertReleaseTag(document.manifest.version, document.manifest.source);
       const dirty = await gitDirtyFiles();
       if (dirty.length) {
         throw invalid(`the working tree has uncommitted changes and the manifest has source; commit or stash first (or pass --skip-git-checks):\n  - ${dirty.join("\n  - ")}`);

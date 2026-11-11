@@ -427,9 +427,11 @@ hash-named file hashes to its name, that the current pointers match them, that e
 the manifest lists is under `hashes/`, and that nothing was modified or deleted since `ref`.
 
 When `webcat.config.json` sets `source`, the manifest claims the files build from that
-repository at tag `version`: `manifest generate` requires HEAD to be that tag and `manifest sign`
-requires a clean working tree (`--skip-git-checks` overrides both). Without `version` in the
-config, the tag at HEAD is the version.
+repository at tag `version`. Before anything is signed, `manifest generate` and `manifest sign`
+both require HEAD to be that tag, the tag to exist on the `source` remote, and, under GitHub,
+Forgejo or Gitea Actions, the job to have been started by that tag rather than a branch push;
+`manifest sign` also requires a clean working tree. `--skip-git-checks` overrides all of it.
+Without `version` in the config, the tag at HEAD is the version.
 
 ## Releasing from CI
 

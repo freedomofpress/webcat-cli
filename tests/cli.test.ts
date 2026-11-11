@@ -788,6 +788,32 @@ describe("history", () => {
   });
 });
 
+describe("release tag checks", () => {
+  it("refuses to sign unless HEAD is the tag, the tag is on the source remote, and CI runs for it", async () => {
+    const { assertReleaseTag } = await import("../src/git");
+    const { execFileSync } = await import("node:child_process");
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-tag-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "one");
+    const remote = await mkdtemp(path.join(tmpdir(), "webcat-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    git("remote", "add", "origin", remote);
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("HEAD is not tagged, and no tag v1.0.0 exists");
+    git("tag", "v1.0.0");
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("tag v1.0.0 is not on");
+    await expect(assertReleaseTag("v1.0.0", path.join(repo, "nowhere"), {}, repo)).rejects.toThrow("cannot list the tags");
+    git("push", "-q", "origin", "v1.0.0");
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).resolves.toBeUndefined();
+    await expect(assertReleaseTag("v1.0.0", remote, { GITHUB_REF_TYPE: "tag", GITHUB_REF_NAME: "v1.0.0" }, repo)).resolves.toBeUndefined();
+    await expect(assertReleaseTag("v1.0.0", remote, { GITHUB_REF_TYPE: "branch", GITHUB_REF_NAME: "main" }, repo)).rejects.toThrow("runs on branch main, not on tag v1.0.0");
+    git("commit", "-q", "--allow-empty", "-m", "two");
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("HEAD is not tagged)");
+    await rm(repo, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+  });
+});
+
 describe("enrollment chain client", () => {
   it("solves proof of work challenges", () => {
     const challenge = "ca8dc16136a1df96d1c258bafbb23b096f7e1c28d22da0237dccd05d3c739f0e";
