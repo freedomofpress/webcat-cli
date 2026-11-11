@@ -533,6 +533,12 @@ describe("csp hints", () => {
     expect(() => validateCSP(suggested)).not.toThrow();
     expect(suggested).toContain("img-src *");
     expect(hintCsp("default-src 'none'; script-src 'self'; style-src 'self'").groups).toEqual([]);
+    // Framing another origin needs a sandbox directive; the nearest policy gets the usual flags and passes the validator.
+    const framed = hintCsp("default-src 'none'; script-src 'self'; style-src 'self'; frame-src https://captcha.example");
+    expect(framed.groups.map((g) => g.title)).toEqual(["Frames from other origins"]);
+    expect(framed.suggested).toContain("sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads");
+    expect(framed.accepted.join(" ")).not.toContain("please report");
+    expect(hintCsp(framed.suggested).compatible).toBe(true);
     expect(hintCsp("default-src 'none', default-src 'self'").groups[0].title).toBe("Multiple policies");
     // 'none' next to another source is not 'none' for the extension; the verdict comes from its validator.
     const mixed = hintCsp("default-src 'none' 'self'");

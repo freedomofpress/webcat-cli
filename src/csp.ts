@@ -50,6 +50,14 @@ const GROUPS: Record<string, Omit<CspGroup, "items">> = {
     ],
     docs: "default-src",
   },
+  frames: {
+    title: "Frames from other origins",
+    advice: [
+      "frame-src, child-src or default-src lets this document frame another origin, so WEBCAT requires a sandbox directive: its flags are inherited by every frame and popup, and a frame can only add restrictions, so no frame can navigate the verified page or open a window that escapes the sandbox.",
+      "Grant the document what it needs itself, typically sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads; allow-top-navigation and allow-popups-to-escape-sandbox are rejected. Then set the sandbox attribute on each <iframe> with only the flags that frame needs, and exchange data over postMessage checking event.origin.",
+    ],
+    docs: "frame-src and sandbox",
+  },
   missing: {
     title: "Missing directives",
     advice: [
@@ -64,6 +72,7 @@ const GROUPS: Record<string, Omit<CspGroup, "items">> = {
 // Where a rejection from the extension's validator goes: by directive, and for scripts by keyword or origin.
 function groupOf(e: CspError): keyof typeof GROUPS {
   if (!e.directive) return "policies";
+  if (e.directive === CspDirective.Sandbox) return "frames";
   if (!e.source) return "missing";
   switch (e.directive) {
     case CspDirective.DefaultSrc:
@@ -83,7 +92,12 @@ function groupOf(e: CspError): keyof typeof GROUPS {
 }
 
 // What to propose for a directive the validator left empty or missing; 'self' otherwise.
-const FILL: Partial<Record<string, string>> = { "default-src": "'none'", "object-src": "'none'", "script-src-attr": "'none'" };
+const FILL: Partial<Record<string, string>> = {
+  "default-src": "'none'",
+  "object-src": "'none'",
+  "script-src-attr": "'none'",
+  sandbox: "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads",
+};
 
 export function hintCsp(csp: string): CspReport {
   const items: Partial<Record<keyof typeof GROUPS, string[]>> = {};
