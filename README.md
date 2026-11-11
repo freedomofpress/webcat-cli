@@ -377,6 +377,29 @@ webcat site check example.org --path / --path /app/main.js
 
 Exits 1 when the bundle does not verify, the enrollment does not match, or any path has a problem.
 
+## Auditing a domain
+
+`audit <domain>` runs the checks of the spec's auditors ([auditing.md](https://github.com/freedomofpress/webcat-spec))
+from the outside, with nothing but what the domain serves:
+
+- `bundle.json` and `bundle-prev.json` verified like the extension does;
+- `enrollment.<hash>.json` for every hash the chain or the bundles name, hashing to its name;
+- `manifest.<type>.<hash>.json` for every served manifest, equal to what the bundle serves;
+- every release reachable from there: the tag on `source`, the `artifact` archive downloaded and
+  every path in `files` hashed against the manifest, the well-known directory inside the archive
+  consistent, and every hash-named file it carried still served unchanged. The archives are
+  walked backwards, since each one carries the directory of its time, until the first release.
+
+```sh
+webcat audit example.org                       # exit 1 when anything above fails
+webcat audit example.org --repro               # plus how to rebuild each release from its source
+webcat audit example.org --version 1.4.0 --built dist   # compare a local build with that release's manifest
+```
+
+`--built` is the reproducibility check of manifest.md section 2.2: build the release from
+`source` at its tag, then compare the output with the manifest. The build recipe itself is not
+yet specified.
+
 ## Exit codes
 
 | Code | Meaning |

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
@@ -811,6 +811,69 @@ describe("release tag checks", () => {
     await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("HEAD is not tagged)");
     await rm(repo, { recursive: true, force: true });
     await rm(remote, { recursive: true, force: true });
+  });
+});
+
+describe("audit", () => {
+  it("walks a domain's served history and its release archives backwards, and reports what breaks", async () => {
+    const { archiveRelease, publishBundle, publishEnrollment } = await import("../src/history");
+    const { auditDomain, formatAudit } = await import("../src/audit");
+    const { createServer } = await import("node:http");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const root = await mkdtemp(path.join(tmpdir(), "webcat-audit-"));
+    const site = path.join(root, "dist");
+    const wellKnown = path.join(root, ".well-known/webcat");
+    await mkdir(site);
+    await publishEnrollment(wellKnown, enrollment);
+    const server = createServer(async (req, res) => {
+      try {
+        const file = path.join(root, decodeURIComponent((req.url ?? "/").split("?")[0]));
+        res.end(await readFile(file.endsWith("/") ? path.join(file, "index.html") : file));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    // Two releases the way release makes them: each archive is the web root with the well-known directory inside.
+    const release = async (version: string, content: string) => {
+      await writeFile(path.join(site, "index.html"), content);
+      const files = { "/index.html": toBase64Url(createHash("sha256").update(content).digest()) };
+      const document = { manifest: { ...bundle.manifest, version, files, artifact: `${origin}/site-\${version}.tar.gz` }, signatures: bundle.signatures };
+      await publishBundle(wellKnown, enrollment, document);
+      await archiveRelease(path.join(root, `site-${version}.tar.gz`), site, wellKnown);
+      return document;
+    };
+    await release("1.0.0", "<h1>one</h1>");
+    const two = await release("1.1.0", "<h1>two</h1>");
+    try {
+      const report = await auditDomain("example.org", { chainApi: `${origin}/no-chain`, origin });
+      expect(report.bundle).toMatch(/^(VERIFIED|FAILED)/); // the fixture reuses the example signatures over other files
+      const unverifiable = report.bundle.startsWith("FAILED") ? 1 : 0; // counted as a problem, as it should be
+      expect(report.enrollments).toEqual([expect.stringContaining("chain not consulted"), expect.stringMatching(/^enrollment\.[0-9a-f]{64}\.json: ok$/)]);
+      expect(report.manifests).toEqual([expect.stringMatching(/^manifest\.sigsum\.[0-9a-f]{64}\.json: ok/)]);
+      expect(report.releases.map((r) => [r.version, r.problems, r.notes])).toEqual([["1.1.0", [], []], ["1.0.0", [], []]]);
+      expect(report.problems).toBe(unverifiable);
+      expect(formatAudit("example.org", report, true)).toContain("1.0.0: no source declared");
+      // A locally built tree is compared with the served manifest; a stale one is a problem.
+      expect((await auditDomain("example.org", { chainApi: `${origin}/no-chain`, origin, built: site, version: "1.1.0" })).problems).toBe(unverifiable);
+      await writeFile(path.join(site, "index.html"), "<h1>stale</h1>");
+      expect((await auditDomain("example.org", { chainApi: `${origin}/no-chain`, origin, built: site, version: "1.1.0" })).releases[0].problems[0]).toMatch(/^built .*index\.html hashes to/);
+      // History obligations: a manifest file that disappears from the site, and a tampered archive, are both caught.
+      const oldManifestFile = (await readdir(wellKnown)).find((n) => n.startsWith("manifest.sigsum.") && !n.includes(two.manifest.version))!;
+      await rm(path.join(root, "site-1.0.0.tar.gz"));
+      const broken = await auditDomain("example.org", { chainApi: `${origin}/no-chain`, origin });
+      expect(broken.releases.find((r) => r.version === "1.0.0")!.problems[0]).toMatch(/archive .*HTTP 404/);
+      await rm(path.join(wellKnown, oldManifestFile));
+      const gone = await auditDomain("example.org", { chainApi: `${origin}/no-chain`, origin });
+      expect(gone.releases.find((r) => r.version === "1.1.0")!.problems).toEqual([expect.stringContaining(`${oldManifestFile} was in the 1.1.0 archive but is no longer served`)]);
+      expect(gone.problems).toBeGreaterThan(unverifiable);
+    } finally {
+      server.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

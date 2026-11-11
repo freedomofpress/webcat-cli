@@ -12,7 +12,7 @@ import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentO
 import { causeOf, external, fetchOk, invalid, log, sha256, toBase64Url } from "./utils.js";
 
 export const WELL_KNOWN_DIR = ".well-known/webcat";
-const HASH_FILE = /^(enrollment|manifest\.sigsum|manifest\.sigstore)\.([0-9a-f]{64})\.json$/;
+export const HASH_FILE = /^(enrollment|manifest\.sigsum|manifest\.sigstore)\.([0-9a-f]{64})\.json$/;
 // Each fallback document of a manifest, under its base64url hash (spec manifest.md fallback_hashes).
 export const HASHES_DIR = "hashes";
 
@@ -177,18 +177,40 @@ export async function archiveRelease(archive: string, siteDirectory: string, dir
   await rm(plain, { force: true });
 }
 
-// Release n inherits the well-known directory from release n-1's archive: hash-named files, fallback documents and the
-// bundle pointers. The archive is first checked against the manifest it ships and its own hash-named files, so a
-// release only inherits history from a predecessor that was what it claimed.
-export async function inheritHistory(dir: string, archiveUrl: string): Promise<string[]> {
-  const work = await mkdtemp(path.join(tmpdir(), "webcat-previous-"));
+// Downloads and extracts a release archive; the caller removes the directory when done.
+export async function fetchArchive(archiveUrl: string): Promise<{ site: string; wellKnown: string; cleanup: () => Promise<void> }> {
+  const work = await mkdtemp(path.join(tmpdir(), "webcat-archive-"));
   try {
     const archive = path.join(work, "release.tgz");
     await writeFile(archive, new Uint8Array(await (await fetchOk(archiveUrl)).arrayBuffer()));
     const site = path.join(work, "site");
     await mkdir(site);
     await tar(["-xzf", archive, "-C", site]);
-    const previous = path.join(site, WELL_KNOWN_DIR);
+    return { site, wellKnown: path.join(site, WELL_KNOWN_DIR), cleanup: () => rm(work, { recursive: true, force: true }) };
+  } catch (err) {
+    await rm(work, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+// Spec manifest.md section 3 and auditing.md 3.1: every path in files is in the directory and hashes as the manifest says.
+export async function verifyArchiveFiles(site: string, document: ManifestDocument): Promise<string[]> {
+  const scan = await scanDirectory(site, { includeDotfiles: true });
+  const problems: string[] = [];
+  for (const [file, hash] of Object.entries(document.manifest.files)) {
+    if (file.endsWith("/")) continue;
+    const actual = scan.files.get(file);
+    problems.push(...(actual === undefined ? [`${file} is missing`] : actual !== hash ? [`${file} hashes to ${actual}, the manifest says ${hash}`] : []));
+  }
+  return problems;
+}
+
+// Release n inherits the well-known directory from release n-1's archive: hash-named files, fallback documents and the
+// bundle pointers. The archive is first checked against the manifest it ships and its own hash-named files, so a
+// release only inherits history from a predecessor that was what it claimed.
+export async function inheritHistory(dir: string, archiveUrl: string): Promise<string[]> {
+  const { site, wellKnown: previous, cleanup } = await fetchArchive(archiveUrl);
+  try {
     const bundleText = await readFile(path.join(previous, "bundle.json"), "utf8").catch(() => null);
     if (bundleText === null) {
       log(`Warning: ${archiveUrl} carries no ${WELL_KNOWN_DIR}/bundle.json; nothing to inherit`);
@@ -196,11 +218,9 @@ export async function inheritHistory(dir: string, archiveUrl: string): Promise<s
     }
     const bundle = JSON.parse(bundleText);
     const document = parseManifestDocumentObject({ manifest: bundle.manifest, signatures: bundle.signatures });
-    const scan = await scanDirectory(site, { includeDotfiles: true });
-    for (const [file, hash] of Object.entries(document.manifest.files)) {
-      if (!file.endsWith("/") && scan.files.get(file) !== hash) {
-        throw invalid(`${archiveUrl}: ${file} is missing or does not hash as the manifest of release ${document.manifest.version} says; not inheriting its history`);
-      }
+    const mismatched = await verifyArchiveFiles(site, document);
+    if (mismatched.length > 0) {
+      throw invalid(`${archiveUrl}: ${mismatched[0].split(" ")[0]} is missing or does not hash as the manifest of release ${document.manifest.version} says; not inheriting its history`);
     }
     const problems = await checkHistory(previous);
     if (problems.length > 0) throw invalid(`${archiveUrl}: ${WELL_KNOWN_DIR} is inconsistent: ${problems.join("; ")}`);
@@ -222,6 +242,6 @@ export async function inheritHistory(dir: string, archiveUrl: string): Promise<s
     }
     return written;
   } finally {
-    await rm(work, { recursive: true, force: true });
+    await cleanup();
   }
 }

@@ -8,6 +8,7 @@ import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
+import { auditDomain, formatAudit } from "./audit.js";
 import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
@@ -691,6 +692,29 @@ program
     const written = await publishBundle(options.dir, enrollment, document, siteDirectory);
     written.forEach((f) => log(`wrote ${f}`));
     await stageInGit(written, options.git, options.commit ? `webcat: publish manifest ${document.manifest.version}` : undefined);
+  });
+
+// ---------------------------------------------------------------------------
+// audit
+
+program
+  .command("audit")
+  .description("Audit a domain the way the spec's auditors do: served bundles, enrollment history, manifest files, and every release archive reachable from them (files, source tag, history inside); exit 1 on problems")
+  .argument("<domain>", "Domain to audit")
+  .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
+  .option("--version <version>", "Only audit this release")
+  .option("--built <dir>", "A locally built web root to compare with the manifest (reproducibility, spec manifest.md section 2.2)")
+  .option("--repro", "Print how to rebuild each release")
+  .option("--json", "Print the report as JSON")
+  .action(async (domain: string, options) => {
+    const report = await auditDomain(domain, {
+      chainApi: options.chainApi,
+      built: options.built,
+      version: options.version,
+      onProgress: process.stderr.isTTY ? (line) => process.stderr.write(`auditing ${line}\n`) : undefined,
+    });
+    process.stdout.write(options.json ? JSON.stringify(report, null, 2) + "\n" : formatAudit(domain, report, Boolean(options.repro)));
+    if (report.problems > 0) process.exitCode = 1;
   });
 
 // ---------------------------------------------------------------------------
