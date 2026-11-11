@@ -7,6 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
+import { forgeOf, releaseWorkflow, verifyWorkflow, workflowDir } from "./ci.js";
 import { gitRemote, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, publishEnrollment } from "./history.js";
 import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
@@ -37,6 +38,9 @@ group  demo-quorum-rule any poc.sigsum.org/nisse rgdd.se/poc-witness
 quorum demo-quorum-rule
 `;
 
+// An identity that names a ref prefix (ending in @refs/tags/ or @refs/heads/) is meant as one: claim it with ^.
+export const tagPrefixIdentity = (identity: string): string => (/@refs\/(tags|heads)\/$/.test(identity) && !identity.startsWith("^") ? `^${identity}` : identity);
+
 export const DEFAULT_MAX_AGE = 180 * 24 * 60 * 60; // the docs' example: six months
 
 export interface InitOptions {
@@ -55,6 +59,7 @@ export interface InitOptions {
   source?: string; // git repository URL; "" for closed source
   artifact?: string; // release archive URL template with ${version}
   directory?: string; // where the built site lives
+  workflows?: boolean; // write the CI jobs for the forge of source (default: yes)
   dir: string;
 }
 
@@ -162,7 +167,11 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
       }
       rest.threshold ??= await ask("threshold", "How many of those signatures must a manifest carry?", "1", atMost("threshold", rest.signer?.length || Number(rest.keys)));
     } else {
-      rest.identity ??= await ask("identity", "Which identity signs your releases? An email, or a GitHub workflow URL such as https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main");
+      // The release workflow on any tag: a ^ prefix claim, so a release does not need a new enrollment.
+      const workflowIdentity = forgeOf(source) === "github" ? `^${source.replace(/\.git$/, "")}/.github/workflows/webcat-release.yml@refs/tags/` : undefined;
+      rest.identity ??= tagPrefixIdentity(
+        await ask("identity", "Which identity signs your releases? An email, or a workflow URL; a ^ prefix matches every ref it starts with (release tags)", workflowIdentity),
+      );
       rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
     }
     return { ...rest, origin, version, type, csp, maxAge, source, artifact, directory };
@@ -246,6 +255,28 @@ export async function runInit(options: InitOptions): Promise<void> {
     log(`wrote ${path.relative(a.dir, file)}`);
   }
   const host = new URL(a.origin).host;
+  // The CI jobs, for the site's own repository: the signing identity is then the site's workflow, nothing of ours.
+  const forge = forgeOf(a.source);
+  const workflows: string[] = [];
+  if (forge && a.workflows !== false) {
+    const jobs: Array<[string, string | null]> = [
+      ["webcat-release.yml", releaseWorkflow({ forge, type: a.type, host, directory: a.directory ?? "dist", tokenKey: Boolean(tokenHex), artifact: Boolean(a.artifact) })],
+      ["webcat-verify.yml", verifyWorkflow({ forge, host })],
+    ];
+    await mkdir(`${a.dir}/${workflowDir(forge)}`, { recursive: true });
+    for (const [name, text] of jobs) {
+      const file = `${workflowDir(forge)}/${name}`;
+      if (text === null) log(`Warning: Forgejo Actions issue no OIDC identity, so no ${file}: sign with --interactive, or release from GitHub Actions`);
+      else if (await access(`${a.dir}/${file}`).then(() => true, () => false)) log(`kept ${file} (exists)`);
+      else {
+        await writeFile(`${a.dir}/${file}`, text);
+        workflows.push(file);
+        log(`wrote ${file}`);
+      }
+    }
+  }
+  const secrets = a.type === "sigsum" ? (tokenHex ? ", and add the keys as the secrets SIGSUM_KEY and SIGSUM_TOKEN_KEY" : ", and add the key as the secret SIGSUM_KEY") : "";
+  const ciStep = workflows.length ? `\n     ${workflows.join(" and ")} do this on every tag push and check the live site on a schedule: commit them${secrets}` : "";
   const key = keyPaths[0] ?? (a.signer ?? []).find((s) => s.endsWith(".pub")) ?? "<private key, or .pub for ssh-agent>";
   const token = tokenHex ? ` --token-signing-key keys/token --token-domain ${host}` : "";
   const release =
@@ -264,7 +295,7 @@ Next steps${dns}
        Content-Security-Policy: ${a.csp}
   3. Build the site into ${a.directory}/, tag the release, then publish it in one step:
        ${release}
-     (generates, signs, writes bundle.json and manifest.<type>.<hash>.json${a.artifact ? ", the release archive" : ""}; the history is kept in the archive of each release)
+     (generates, signs, writes bundle.json and manifest.<type>.<hash>.json${a.artifact ? ", the release archive" : ""}; the history is kept in the archive of each release)${ciStep}
   4. Deploy with ${WELL_KNOWN_DIR}/ copied into the web root, then check what visitors and auditors will see:
        webcat site check ${host}
   5. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}

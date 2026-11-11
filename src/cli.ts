@@ -23,7 +23,7 @@ import {
   migrateManifest,
 } from "./manifest.js";
 import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
-import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
+import { CSP_PRESETS, tagPrefixIdentity, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
 import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
 import { checkSite } from "./site.js";
 import {
@@ -139,6 +139,7 @@ program
   .option("--source <url>", "Git repository the site is built from (default: the origin remote); empty for closed source")
   .option("--artifact <url>", "Release archive URL template containing ${version}; empty if none")
   .option("--directory <path>", "Directory the build writes the site into (default: dist)")
+  .option("--no-workflows", "Do not write the CI jobs (webcat-release.yml, webcat-verify.yml) for the forge of source")
   .addOption(typeOption("Enrollment"))
   .option("--csp <policy>", `Content Security Policy; presets: ${Object.keys(CSP_PRESETS).join(", ")}`)
   .option("--max-age <seconds>", "How long a signed manifest stays valid", String(DEFAULT_MAX_AGE))
@@ -262,7 +263,7 @@ enrollmentCreate.action(async (options) => {
   } else {
     // Explicit --claim first, then legacy aliases, then named flags; later entries win per OID.
     const claims: Record<string, string> = { ...(options.claim ?? {}) };
-    if (options.identity) claims[SAN_OID] = options.identity.trim();
+    if (options.identity) claims[SAN_OID] = tagPrefixIdentity(options.identity.trim());
     if (options.issuer) claims[ISSUER_V2_OID] = options.issuer.trim();
     for (const [flag, oid] of SIGSTORE_CLAIM_FLAGS) {
       const value = options[camel(flag)];

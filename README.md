@@ -75,13 +75,15 @@ the same one used by GitHub and public container registries.
 > [!WARNING]
 > Sigstore support is still a work in progress. Claim-based enrollment constraints are supported.
 
-Enroll once, naming the workflow that will sign (the identity is the workflow file at the
-branch that runs it):
+Enroll once, naming the workflow that will sign. The identity is the workflow file and the
+ref that runs it; a leading `^` makes the claim a prefix, so `@refs/tags/` covers every release
+tag and no new enrollment is needed per release. `init` and `enrollment create` add the `^`
+when an identity ends in `@refs/tags/` or `@refs/heads/`:
 
 ```sh
 webcat init --type sigstore \
   --origin https://example.org \
-  --identity https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --identity '^https://github.com/acme/repo/.github/workflows/webcat-release.yml@refs/tags/' \
   --issuer https://token.actions.githubusercontent.com
 ```
 
@@ -212,7 +214,7 @@ webcat enrollment create \
   --community-trusted-root \
   --identity alice@example.com \
   --issuer https://token.actions.githubusercontent.com \
-  --build-signer-uri https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --build-signer-uri '^https://github.com/acme/repo/.github/workflows/webcat-release.yml@refs/tags/' \
   --claim 1.3.6.1.4.1.57264.1.11=platform-hosted \
   --max-age 3600
 ```
@@ -469,22 +471,33 @@ so the clone must not be shallow.
 `https://github.com/acme/site/releases/download/${version}/site-${version}.tar.gz`;
 `release` writes `site-<version>.tar.gz` in the working directory for the job to upload.
 
+`init` writes both jobs below into your repository for the forge `source` points at
+(`.github/workflows/` on GitHub, `.forgejo/workflows/` on Codeberg and other Forgejo or Gitea
+hosts), with your host, build directory and keys filled in, and never overwrites an existing
+file. They are plain files you own: no reusable workflow from this repository is involved, so
+the identity in your certificates is your own workflow and nothing here can break your release.
+Pass `--no-workflows` to skip them. The same text, to copy by hand:
+
 #### GitHub Actions, Sigstore
 
 The job signs with its own identity; the `id-token` permission is what lets it obtain a
-certificate. Enroll with that identity as shown [above](#choosing-sigstore).
+certificate. The enrollment names that workflow on any tag with a prefix claim, see
+[above](#choosing-sigstore).
 
 ```yaml
-# .github/workflows/release.yml
+# .github/workflows/webcat-release.yml
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+name: WEBCAT release
 on:
   push:
     tags: ["v*"]
+permissions:
+  contents: write
+  id-token: write     # the Sigstore identity the enrollment names
 jobs:
   release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write     # to upload the archive to the GitHub release
-      id-token: write     # Sigstore identity
     steps:
       - uses: actions/checkout@v4
         with:
@@ -493,14 +506,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm ci && npm run build                          # produces dist/
-      - run: npm install -g @freedomofpress/webcat-cli
+      - run: npm ci && npm run build                          # must produce dist/
+      - run: npm install -g @freedomofpress/webcat-cli@0.1.2
       - run: webcat release --type sigstore
       - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
       - run: cp -r .well-known dist/
-      # deploy dist/ as usual
+      # deploy dist/ as usual; webcat-verify.yml then checks what visitors and auditors see
 ```
 
 #### Forgejo Actions, Sigsum
@@ -508,13 +521,19 @@ jobs:
 Sigsum signs with a key, so the job holds one as a secret, and production logs want the
 rate-limit token key too (`init` generates both under `keys/`). Every signature the key makes
 is public in the Sigsum logs; that, not the secrecy of the CI runner, is what keeps a stolen
-key from going unnoticed. `manifest sign` needs `sigsum-submit` on the path.
+key from going unnoticed. Forgejo Actions issue no OIDC identity, so Sigstore sites sign
+elsewhere.
 
 ```yaml
-# .forgejo/workflows/release.yml
+# .forgejo/workflows/webcat-release.yml
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+name: WEBCAT release
 on:
   push:
     tags: ["v*"]
+permissions:
+  contents: write
 jobs:
   release:
     runs-on: docker
@@ -525,12 +544,15 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - uses: https://code.forgejo.org/actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: https://code.forgejo.org/actions/setup-go@v5
         with:
           go-version: stable
+      - run: npm ci && npm run build                          # must produce dist/
+      - run: npm install -g @freedomofpress/webcat-cli@0.1.2
       - run: go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH"
-      - run: npm ci && npm run build                          # produces dist/
-      - run: npm install -g @freedomofpress/webcat-cli
       - run: |
           install -m 600 /dev/stdin keys/key1 <<< "$SIGSUM_KEY"
           install -m 600 /dev/stdin keys/token <<< "$SIGSUM_TOKEN_KEY"
@@ -544,7 +566,34 @@ jobs:
           direction: upload
           release-dir: release
       - run: cp -r .well-known dist/
-      # deploy dist/ as usual
+      # deploy dist/ as usual; webcat-verify.yml then checks what visitors and auditors see
+```
+
+#### Verifying the live site on a schedule
+
+Deploys drift: a cache serves a stale file, a host setting changes a header. The second job
+checks what visitors and auditors see every six hours and fails when anything is off.
+
+```yaml
+# .github/workflows/webcat-verify.yml
+# Written by webcat init. Checks the live site the way the extension and the auditors do; a failure is a broken site.
+name: WEBCAT verify
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @freedomofpress/webcat-cli@0.1.2
+      - run: webcat site check example.org
+      - run: webcat audit example.org
 ```
 
 ## End-to-end example (based on `demo.sh`)

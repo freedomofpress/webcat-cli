@@ -549,6 +549,29 @@ describe("init", () => {
     expect(await readFile(path.join(dir, "trust_policy"), "utf8")).toContain("quorum");
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("writes the site's own CI jobs for the forge of source, and never a second time", async () => {
+    const { runInit } = await import("../src/init");
+    const { releaseWorkflow } = await import("../src/ci");
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-ci-"));
+    const flags = { dir, origin: "https://example.org", type: "sigstore" as const, identity: "a@b", issuer: "https://accounts.google.com", source: "https://github.com/o/r", artifact: "https://github.com/o/r/releases/download/${version}/site-${version}.tar.gz" };
+    await runInit(flags);
+    const release = await readFile(path.join(dir, ".github/workflows/webcat-release.yml"), "utf8");
+    expect(release).toContain("webcat release --type sigstore");
+    expect(release).toContain("gh release create");
+    expect(release).toContain("id-token: write");
+    expect(await readFile(path.join(dir, ".github/workflows/webcat-verify.yml"), "utf8")).toContain("webcat audit example.org");
+    await writeFile(path.join(dir, ".github/workflows/webcat-release.yml"), "mine");
+    await runInit(flags);
+    expect(await readFile(path.join(dir, ".github/workflows/webcat-release.yml"), "utf8")).toBe("mine");
+    // Sigsum on a Forgejo: the key secrets and the forge's own actions; Sigstore there has no identity to sign with.
+    const forgejo = releaseWorkflow({ forge: "forgejo", type: "sigsum", host: "example.org", directory: "dist", tokenKey: true, artifact: true })!;
+    expect(forgejo).toContain("SIGSUM_TOKEN_KEY");
+    expect(forgejo).toContain("--token-domain example.org");
+    expect(forgejo).toContain("code.forgejo.org/actions/checkout");
+    expect(releaseWorkflow({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", tokenKey: false, artifact: false })).toBeNull();
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 describe("trusted root drift", () => {
