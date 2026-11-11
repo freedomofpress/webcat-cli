@@ -10,7 +10,7 @@ import { parseEnrollmentObject } from "./enrollment.js";
 import { gitRemoteTagExists } from "./git.js";
 import { HASH_FILE, WELL_KNOWN_DIR, checkHistory, fetchArchive, manifestFileName, verifyArchiveFiles } from "./history.js";
 import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentObject } from "./manifest.js";
-import { causeOf, describeWebcatError, external } from "./utils.js";
+import { causeOf, describeWebcatError, ensureObject, external } from "./utils.js";
 
 export interface ReleaseAudit {
   version: string;
@@ -42,13 +42,38 @@ export function reproGuideline(domain: string, release: ReleaseAudit): string[] 
   ];
 }
 
-async function fetchJsonOrNull(url: string): Promise<unknown | null> {
+// A JSON object, or null when the server has no such file; catch-all servers answer every path with a page, which is
+// no file either. Other failures are reported, not thrown: an audit lists what is wrong.
+async function fetchJsonOrNull(url: string): Promise<Record<string, unknown> | null> {
   const response = await fetch(url).catch((err) => {
     throw external(`failed to fetch ${url}: ${causeOf(err)}`);
   });
-  if (response.status === 404 || response.status === 410) return null;
-  if (!response.ok) throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
-  return response.json().catch(() => "not JSON");
+  if (!response.ok) return null;
+  const parsed: unknown = await response.json().catch(() => null);
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+}
+
+// What the extension would make of the bundle, and a bundle to walk the history with even when it would reject it:
+// a manifest the current validator refuses (a CSP rule added since it was signed) still names files and releases.
+async function loadBundle(url: string): Promise<{ bundle: BundleDocument; verdict: string } | null> {
+  const parsed = await fetchJsonOrNull(url);
+  if (parsed === null) return null;
+  let bundle: BundleDocument;
+  let verdict: string;
+  try {
+    bundle = parseBundleObject(parsed, url);
+    const result = await verifyBundle(bundle);
+    verdict = result instanceof WebcatError ? `FAILED: ${describeWebcatError(result)}` : `VERIFIED (${describeValidity(result)})`;
+  } catch (err) {
+    verdict = `FAILED: ${causeOf(err)}`;
+    try {
+      const manifest = ensureObject(parsed.manifest, "manifest") as unknown as ManifestDocument["manifest"];
+      bundle = { enrollment: parseEnrollmentObject(parsed.enrollment), manifest: { manifest, signatures: parsed.signatures as ManifestDocument["signatures"] } };
+    } catch (inner) {
+      throw external(`${url}: ${causeOf(inner)}; cannot audit a domain whose bundle has no enrollment or manifest`);
+    }
+  }
+  return { bundle, verdict };
 }
 
 export async function auditDomain(
@@ -58,19 +83,13 @@ export async function auditDomain(
   const origin = options.origin ?? `https://${bareDomain(domain)}`;
   const wellKnownUrl = (name: string) => `${origin}/${WELL_KNOWN_DIR}/${name}`;
   const progress = options.onProgress ?? (() => {});
-  const describe = async (bundle: BundleDocument | null): Promise<string> => {
-    if (!bundle) return "none";
-    const result = await verifyBundle(bundle);
-    return result instanceof WebcatError ? `FAILED: ${describeWebcatError(result)}` : `VERIFIED (${describeValidity(result)})`;
-  };
-  const loadBundle = async (name: string): Promise<BundleDocument | null> => {
-    const parsed = await fetchJsonOrNull(wellKnownUrl(name));
-    return parsed === null ? null : parseBundleObject(parsed, wellKnownUrl(name));
-  };
-  const current = await loadBundle("bundle.json");
-  if (!current) throw external(`${wellKnownUrl("bundle.json")} is not found; nothing to audit`);
-  const previous = await loadBundle("bundle-prev.json");
-  const report: AuditReport = { bundle: await describe(current), previousBundle: await describe(previous), enrollments: [], manifests: [], releases: [], problems: 0 };
+  const loaded = await loadBundle(wellKnownUrl("bundle.json"));
+  if (!loaded) throw external(`${wellKnownUrl("bundle.json")} is not found; nothing to audit`);
+  // A previous bundle only matters during an enrollment change; a broken one is reported, not fatal.
+  const loadedPrevious = await loadBundle(wellKnownUrl("bundle-prev.json")).catch((err) => ({ bundle: null, verdict: `FAILED: ${causeOf(err)}` }));
+  const current = loaded.bundle;
+  const previous = loadedPrevious?.bundle ?? null;
+  const report: AuditReport = { bundle: loaded.verdict, previousBundle: loadedPrevious?.verdict ?? "none", enrollments: [], manifests: [], releases: [], problems: 0 };
 
   // 2.1 Enrollment history: every hash the chain or a served bundle names has its file, and the file hashes to the name.
   const status = await fetchDomainStatus(options.chainApi, domain).catch((err) => err as Error);
