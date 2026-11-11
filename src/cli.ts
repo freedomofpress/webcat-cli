@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { readFile, writeFile } from "node:fs/promises";
+import { hasSchema } from "@freedomofpress/webcat/webcat/canonicalize";
 import path from "node:path";
 import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
-import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment } from "./enrollment.js";
+import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
 import { publishManifestToCas, writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
@@ -15,8 +17,9 @@ import {
   manifestHash,
   scanDirectory,
   writeFallbackCopies,
+  migrateManifest,
 } from "./manifest.js";
-import { describeValidity, loadBundleDocument, verifyBundle } from "./bundle.js";
+import { describeValidity, loadBundleDocument, verifyBundle, parseBundleObject } from "./bundle.js";
 import { CSP_PRESETS, DEFAULT_MAX_AGE, SIGSUM_POLICIES, runInit } from "./init.js";
 import { fetchSiteCsp, formatCspReport, hintCsp } from "./csp.js";
 import { checkSite } from "./site.js";
@@ -130,7 +133,7 @@ program
   .addOption(new Option("--signer <key>", "Existing signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
   .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
-  .addOption(new Option("--cas-url <url>", "Where Sigsum proofs are published").helpGroup(SIGSUM))
+  .addOption(new Option("--cas-url <url>", "Deprecated, ignored: schema 1 enrollments carry no cas_url").helpGroup(SIGSUM).hideHelp())
   .addOption(new Option("--identity <value>", "Signing identity").helpGroup(SIGSTORE))
   .addOption(new Option("--issuer <url>", "OIDC issuer").helpGroup(SIGSTORE))
   .option("-d, --dir <path>", "Directory to write into", ".")
@@ -213,7 +216,7 @@ const enrollmentCreate = enrollment
   .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
   .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
-  .addOption(new Option("-c, --cas-url <url>", "CAS https URL").helpGroup(SIGSUM))
+  .addOption(new Option("-c, --cas-url <url>", "Deprecated, ignored: schema 1 enrollments carry no cas_url").helpGroup(SIGSUM).hideHelp())
   .addOption(new Option("--trusted-root <path>", "Sigstore trusted root file").helpGroup(SIGSTORE))
   .addOption(new Option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF").helpGroup(SIGSTORE))
   .addOption(new Option("--keep-rekor-v1", `Keep ${DEFAULT_REKOR_URL} (Rekor v1) in the trusted root instead of distrusting it`).helpGroup(SIGSTORE))
@@ -235,8 +238,8 @@ enrollmentCreate.action(async (options) => {
       [options.signer, "--signer"],
       [options.threshold, "--threshold"],
       [options.maxAge, "--max-age"],
-      [options.casUrl, "--cas-url"],
     );
+    if (options.casUrl) log("Warning: --cas-url is deprecated and ignored; schema 1 enrollments carry no cas_url (spec server.md)");
     const policyText = await readText(options.policyFile, "policy");
     enrollmentObject = await buildEnrollmentObject({
       type: "sigsum",
@@ -244,7 +247,6 @@ enrollmentCreate.action(async (options) => {
       signers: options.signer,
       threshold: options.threshold,
       maxAge: options.maxAge,
-      casUrl: options.casUrl,
     });
   } else {
     // Explicit --claim first, then legacy aliases, then named flags; later entries win per OID.
@@ -302,25 +304,6 @@ enrollment
   .action(async (options) => {
     const canonical = canonicalizeEnrollment(await loadEnrollment(options.input));
     process.stdout.write(toBase64Url(sha256(canonical)) + "\n");
-  });
-
-enrollment
-  .command("migrate")
-  .description("Rewrite an enrollment as schema 1: enrollment_schema 1 and no cas_url, everything signatures depend on unchanged")
-  .option("-i, --input <path>", "Enrollment file to migrate", ".well-known/webcat/enrollment.json")
-  .option("-o, --output <path>", "Write the migrated enrollment to a file instead of stdout")
-  .action(async (options) => {
-    const current = await loadEnrollment(options.input);
-    const migrated = migrateEnrollment(current);
-    if (migrated === current) {
-      log(`${options.input} is already schema ${current.enrollment_schema}; nothing to migrate`);
-    }
-    await writeOutput(options.output, JSON.stringify(migrated, null, 2));
-    if (migrated !== current) {
-      log(
-        `enrollment hash ${enrollmentHashHex(current).slice(0, 16)}… becomes ${enrollmentHashHex(migrated).slice(0, 16)}…: publish it in a new bundle, keep the current bundle as bundle-prev.json, then run enrollment submit <domain>`,
-      );
-    }
   });
 
 enrollment
@@ -480,6 +463,15 @@ manifest
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(async (options, command: Command) => {
     const document = await loadManifestDocument(options.input);
+    const signed = Array.isArray(document.signatures) ? document.signatures.length : Object.keys(document.signatures ?? {}).length;
+    if (!hasSchema(document.manifest)) {
+      if (signed) {
+        log("Warning: the manifest predates schema 1 and is already signed; regenerate it to migrate");
+      } else {
+        document.manifest = migrateManifest(document.manifest);
+        log("migrated the manifest to schema 1 before signing (spec manifest.md)");
+      }
+    }
     // The default enrollment path may simply not exist; an explicit one must.
     const enrollment = await loadEnrollment(options.enrollment).catch((err) => {
       if (command.getOptionValueSource("enrollment") === "default" && err instanceof CliError && /not found/.test(err.message)) {
@@ -660,7 +652,20 @@ program
   .option("-m, --manifest <path>", "Signed manifest JSON file", "manifest.signed.json")
   .option("-o, --output <path>", "Write bundle JSON to a file")
   .action(async (options) => {
-    const [enrollment, document] = await Promise.all([loadEnrollment(options.enrollment), loadManifestDocument(options.manifest)]);
+    const [current, document] = await Promise.all([loadEnrollment(options.enrollment), loadManifestDocument(options.manifest)]);
+    // The served enrollment migrates to schema 1 here; the chain learns the new hash from enrollment submit.
+    const enrollment = migrateEnrollment(current);
+    if (enrollment !== current) log(`migrated ${options.enrollment} to schema 1 (spec server.md): run enrollment submit <domain> once this bundle is served`);
+    if (options.output) {
+      // A bundle served with another enrollment stays reachable as bundle-prev.json until the chain records the new hash.
+      const previousText = await readFile(options.output, "utf8").catch(() => null);
+      const previous = previousText === null ? null : parseBundleObject(JSON.parse(previousText));
+      if (previous && previousText && enrollmentHashHex(parseEnrollmentObject(previous.enrollment)) !== enrollmentHashHex(enrollment)) {
+        const prevPath = path.join(path.dirname(options.output), "bundle-prev.json");
+        await writeFile(prevPath, previousText);
+        log(`kept the current ${options.output} as ${prevPath}: its enrollment differs, serve both until the chain records the new one`);
+      }
+    }
     const bundleDocument = { enrollment, manifest: document.manifest, signatures: document.signatures };
     await writeOutput(options.output, JSON.stringify(bundleDocument, null, 2));
   });

@@ -235,6 +235,16 @@ export function effectiveManifest(manifest: ManifestContent): ManifestContent {
   return { ...manifest, files, fallback_hashes };
 }
 
+// Schema 0 -> 1 (spec manifest.md): the legacy fields become directory keys and fallback_hashes, app goes, and the
+// version must already be a semantic version. Changes the signed bytes, so only for a manifest not yet signed.
+export function migrateManifest(manifest: ManifestContent): ManifestContent {
+  if (hasSchema(manifest)) return manifest;
+  const { app: _app, default_index: _index, default_fallback: _fallback, ...rest } = effectiveManifest(manifest);
+  const migrated: ManifestContent = { manifest_schema: 1, ...rest };
+  validateManifestContent(migrated, "manifest");
+  return migrated;
+}
+
 function parseManifestSignatures(value: unknown): ManifestSignatures | undefined {
   if (value === undefined || value === null) {
     return undefined;

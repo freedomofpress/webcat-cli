@@ -19,8 +19,12 @@ describe("command line", () => {
     expect(webcat("manifest", "hash", "-m", "examples/manifest.json").stdout).toBe(webcat("manifest", "hash", "-i", "examples/manifest.json").stdout);
     expect(webcat("enrollment", "canonicalize", "-e", "examples/enrollment.json").stdout).toMatch(/^\{"cas_url":/);
     expect(webcat("enrollment", "hash", "-i", "examples/enrollment.json").code).toBe(0);
-    const migrated = webcat("enrollment", "migrate", "-i", "examples/enrollment.json");
-    expect([migrated.code, JSON.parse(migrated.stdout).enrollment_schema, "cas_url" in JSON.parse(migrated.stdout)]).toEqual([0, 1, false]);
+  });
+
+  it("bundle create migrates the enrollment to schema 1 and leaves the signed manifest alone", () => {
+    const { stdout, code } = webcat("bundle", "create", "-e", "examples/enrollment.json", "-m", "examples/manifest.json");
+    const bundle = JSON.parse(stdout);
+    expect([code, bundle.enrollment.enrollment_schema, "cas_url" in bundle.enrollment, bundle.manifest.manifest_schema]).toEqual([0, 1, false, undefined]);
   });
 
   it("verifies the example bundle with the extension's verifier", () => {
@@ -49,7 +53,6 @@ describe("command line", () => {
     const { stdout, code } = webcat("enrollment", "create", "-p", "/nonexistent");
     expect(code).toBe(2);
     expect(stdout).toContain("--signer is required");
-    expect(stdout).toContain("--cas-url is required");
   });
 
   it("maps usage errors to exit 2 and prints a version", () => {

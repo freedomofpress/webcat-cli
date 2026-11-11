@@ -182,15 +182,13 @@ everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
 `manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
 ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
 
-### Content-addressable storage (`cas_url`)
+### Content-addressable storage (deprecated)
 
-A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes two objects under `./cas/`,
-named by their SHA-256: the submitted message (the manifest's SHA-256) and the canonical manifest.
-A log entry's checksum is the SHA-256 of the message, so an auditor fetches `cas_url/<checksum>`
-to get the message and `cas_url/<sha256 of message>` to get the manifest; the site must serve the
-`cas/` directory at `cas_url` as static files (any https URL you control works, for example
-`https://example.org/cas/`). With `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
-`WEBCAT_CAS_S3_TOKEN` set, `manifest sign` also uploads them to an S3-compatible bucket.
+Enrollments before schema 1 named a `cas_url`; schema 1 enrollments carry none (spec server.md),
+and auditing moves to the well-known directory. `manifest sign` still writes the two objects
+under `./cas/` (the submitted message and the canonical manifest, named by SHA-256) for sites
+enrolled that way, and uploads them when `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
+`WEBCAT_CAS_S3_TOKEN` are set.
 
 `init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
 or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
@@ -199,7 +197,7 @@ so it runs unattended in CI:
 
 ```sh
 webcat init
-webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
+webcat init --origin https://example.org --signer <hex pubkey>
 webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
 ```
 
@@ -252,20 +250,17 @@ webcat enrollment create \
 ### Migrating to schema 1
 
 Enrollments and manifests gained a schema field (spec server.md and manifest.md). Extension 3.3.0
-accepts both generations; a later release will set a minimum and reject the old one.
+accepts both generations; a later release will set a minimum and reject the old one. There is
+nothing to run on purpose: the commands a release already goes through migrate as they go.
 
-- Manifests migrate on the next release: `manifest generate` writes schema 1 from the same
-  `webcat.config.json`, and it verifies under the existing enrollment, old or new.
-- Enrollments change hash, so they go through the chain again:
-
-```sh
-webcat enrollment migrate -i .well-known/webcat/enrollment.json -o enrollment.json   # schema 1, no cas_url
-# bundle it with the current signed manifest, keep the current bundle.json as bundle-prev.json, deploy
-webcat enrollment submit example.org
-```
-
-Nothing signatures depend on changes, so the manifest already signed keeps verifying under the
-migrated enrollment; no re-signing is needed.
+- `manifest generate` writes schema 1 from the same `webcat.config.json`; `manifest sign`
+  migrates an unsigned schema 0 manifest before signing. Either verifies under the existing
+  enrollment, old or new.
+- `bundle create` writes the enrollment as schema 1 (no `cas_url`). Nothing signatures depend on
+  changes, so the signed manifest keeps verifying and no re-signing is needed. The hash does
+  change: when the previous bundle at the output path carries another enrollment it is kept as
+  `bundle-prev.json` next to it, so serve both and run `enrollment submit <domain>` for the chain
+  to record the new hash.
 
 ### Submitting and checking an enrollment
 
@@ -476,7 +471,6 @@ webcat enrollment create \
   --policy-file trust_policy \
   --threshold 1 \
   --max-age 15552000 \
-  --cas-url https://cas.demoelement.com \
   --signer "$HEX1" \
   --signer "$HEX2" \
   --output enrollment.json

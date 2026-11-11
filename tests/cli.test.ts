@@ -93,7 +93,6 @@ describe("enrollment helpers", () => {
       signers: [baseSigner],
       threshold: 1,
       maxAge: 1_000_000,
-      casUrl: "https://example.com",
       logs: real.logs,
     });
 
@@ -102,6 +101,7 @@ describe("enrollment helpers", () => {
       throw new Error("expected sigsum enrollment");
     }
     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
+    expect([enrollment.enrollment_schema, "cas_url" in enrollment]).toEqual([1, false]);
     expect(enrollment.threshold).toBe(1);
     expect(enrollment.max_age).toBe(1_000_000);
   });
@@ -114,8 +114,7 @@ describe("enrollment helpers", () => {
         signers: [],
         threshold: 1,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
 
@@ -126,8 +125,7 @@ describe("enrollment helpers", () => {
         signers: [baseSigner, baseSigner],
         threshold: 1,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment.signers must not contain duplicates");
 
@@ -138,8 +136,7 @@ describe("enrollment helpers", () => {
         signers: [baseSigner, secondSigner],
         threshold: 3,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
 
@@ -150,22 +147,10 @@ describe("enrollment helpers", () => {
         signers: [baseSigner],
         threshold: 0,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
-    await expect(
-      buildEnrollmentObject({
-        type: "sigsum",
-        policy: real.policy,
-        signers: [baseSigner],
-        threshold: 1,
-        maxAge: 60 * 60 * 24 * 8,
-        casUrl: "http://example.com",
-        logs: real.logs,
-      }),
-    ).rejects.toThrow("enrollment.cas_url must use https://");
   });
 
   it("builds sigstore enrollment objects", async () => {
@@ -182,6 +167,7 @@ describe("enrollment helpers", () => {
 
     expect(enrollment).toEqual({
       type: "sigstore",
+      enrollment_schema: 1,
       trusted_root: trustedRoot,
       claims: {
         "2.5.29.17": "identity@example.com",
@@ -701,6 +687,19 @@ describe("schema 1 migrations", () => {
     expect(validateSigstoreEnrollment(migrated as any, 1)).toBeNull();
     expect(enrollmentHashHex(migrated)).not.toBe(enrollmentHashHex(old));
     expect(migrateEnrollment(migrated)).toBe(migrated);
+  });
+
+  it("migrates an unsigned schema 0 manifest to schema 1 at signing time", async () => {
+    const { migrateManifest } = await import("../src/manifest");
+    const { validateManifest } = await import("@freedomofpress/webcat/webcat/validators");
+    const legacy = (await loadManifestDocument("examples/manifest.json")).manifest;
+    const migrated = migrateManifest(legacy);
+    expect([migrated.manifest_schema, migrated.app, migrated.default_index, migrated.default_fallback]).toEqual([1, undefined, undefined, undefined]);
+    expect(migrated.files["/"]).toBe(legacy.files[`/${legacy.default_index}`]);
+    expect(migrated.fallback_hashes).toEqual([legacy.files[legacy.default_fallback!]]);
+    expect(validateManifest(migrated, 1)).toBeNull();
+    expect(migrateManifest(migrated)).toBe(migrated);
+    expect(() => migrateManifest({ ...legacy, version: "1" })).toThrow("manifest.version must be a semantic version");
   });
 
   it("renews a schema 0 manifest as schema 1 from the config it was generated with", async () => {

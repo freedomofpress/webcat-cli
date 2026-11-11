@@ -8,7 +8,7 @@ import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
 import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
-import { causeOf, invalid, log, readText, validateAll, validateCasUrl } from "./utils.js";
+import { causeOf, invalid, log, readText, validateAll } from "./utils.js";
 
 export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
   static: {
@@ -153,7 +153,6 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
           .filter(Boolean);
       }
       rest.threshold ??= await ask("threshold", "How many of those signatures must a manifest carry?", "1", atMost("threshold", rest.signer?.length || Number(rest.keys)));
-      rest.casUrl ??= await ask("cas-url", "Where will Sigsum proofs be published? The URL of your content-addressed store", `${origin.replace(/\/+$/, "")}/cas/`, (v) => validateCasUrl(v, "--cas-url"));
     } else {
       rest.identity ??= await ask("identity", "Which identity signs your releases? An email, or a GitHub workflow URL such as https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main");
       rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
@@ -206,7 +205,6 @@ export async function runInit(options: InitOptions): Promise<void> {
           signers,
           threshold: a.threshold ?? 1,
           maxAge: a.maxAge,
-          casUrl: a.casUrl ?? "",
         })
       : await buildEnrollmentObject({
           type: "sigstore",
@@ -238,7 +236,6 @@ export async function runInit(options: InitOptions): Promise<void> {
   0. Publish this DNS record so the production logs accept your submissions:
        _sigsum_v1.${host}. IN TXT "${tokenHex}"`
     : "";
-  const cas = a.type === "sigsum" ? `\n  7. Serve the cas/ directory that manifest sign writes at ${a.casUrl} (files named by their sha256)` : "";
   stdout.write(`
 Next steps${dns}
   1. Serve the .well-known/webcat/ directory at ${a.origin}/.well-known/webcat/
@@ -250,6 +247,6 @@ Next steps${dns}
        webcat bundle create -o .well-known/webcat/bundle.json
   4. Deploy, then check what visitors will see:   webcat site check ${host}
   5. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}
-  6. Follow promotion on the chain:               webcat enrollment status ${host}${cas}
+  6. Follow promotion on the chain:               webcat enrollment status ${host}
 `);
 }

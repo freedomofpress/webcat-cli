@@ -14,7 +14,6 @@ import {
   readText,
   toBase64Url,
   validateAll,
-  validateCasUrl,
   validateMaxAge,
 } from "./utils.js";
 
@@ -48,18 +47,21 @@ export function signerFromOpenSsh(line: string): string {
 export const signerFromValue = async (value: string): Promise<string> =>
   value.endsWith(".pub") ? signerFromOpenSsh(await readText(value, "signer public key")) : parseSignerKey(value);
 
-// CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated enrollment.
+// CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated schema 1 enrollment (spec server.md).
 export async function buildEnrollmentObject(
   o:
-    | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; casUrl: string; logs?: Record<string, string> }
+    | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; logs?: Record<string, string> }
     | { type: "sigstore"; trustedRoot: unknown; claims: unknown; maxAge: number | string },
 ): Promise<Enrollment> {
   const max_age = parseInteger(o.maxAge, "--max-age");
   if (o.type === "sigstore") {
-    return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
+    return parseEnrollmentObject({ type: "sigstore", enrollment_schema: 1, trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
   }
   const signers = await Promise.all(o.signers.map(signerFromValue));
-  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs }, { authoring: true });
+  return parseEnrollmentObject(
+    { type: "sigsum", enrollment_schema: 1, policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, logs: o.logs },
+    { authoring: true },
+  );
 }
 
 // The extension's validators decide what an enrollment is; that is all that is checked on anything read from disk or
@@ -104,8 +106,6 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
               throw invalid("enrollment.signers must not contain duplicates");
             }
           },
-          // Schema 1 has no cas_url (the well-known directory replaced the CAS); schema 0 keeps the one it was enrolled with.
-          ...(enrollment.enrollment_schema === undefined ? [() => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url")] : []),
           () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
           () => {
             if (policyLogs instanceof Error) {
