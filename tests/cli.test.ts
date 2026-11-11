@@ -558,6 +558,16 @@ describe("init", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-ci-"));
     const flags = { dir, origin: "https://example.org", type: "sigstore" as const, identity: "a@b", issuer: "https://accounts.google.com", source: "https://github.com/o/r", artifact: "https://github.com/o/r/releases/download/${version}/site-${version}.tar.gz" };
     await runInit(flags);
+    // A workflow identity pins the workflow prefix, the repository, the ref prefix and the hosted runner; an email pins the SAN.
+    const { sigstoreClaims } = await import("../src/init");
+    expect(sigstoreClaims("^https://github.com/o/r/.github/workflows/webcat-release.yml@refs/tags/", "https://token.actions.githubusercontent.com")).toEqual({
+      "1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com",
+      "1.3.6.1.4.1.57264.1.9": "^https://github.com/o/r/.github/workflows/webcat-release.yml@refs/tags/",
+      "1.3.6.1.4.1.57264.1.11": "github-hosted",
+      "1.3.6.1.4.1.57264.1.12": "https://github.com/o/r",
+      "1.3.6.1.4.1.57264.1.14": "^refs/tags/",
+    });
+    expect(sigstoreClaims("a@b", "https://accounts.google.com")).toEqual({ "2.5.29.17": "a@b", "1.3.6.1.4.1.57264.1.8": "https://accounts.google.com" });
     const release = await readFile(path.join(dir, ".github/workflows/webcat-release.yml"), "utf8");
     expect(release).toContain("webcat release --type sigstore");
     expect(release).toContain("gh release create");

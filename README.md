@@ -78,7 +78,10 @@ the same one used by GitHub and public container registries.
 Enroll once, naming the workflow that will sign. The identity is the workflow file and the
 ref that runs it; a leading `^` makes the claim a prefix, so `@refs/tags/` covers every release
 tag and no new enrollment is needed per release. `init` and `enrollment create` add the `^`
-when an identity ends in `@refs/tags/` or `@refs/heads/`:
+when an identity ends in `@refs/tags/` or `@refs/heads/`. For a GitHub Actions workflow `init`
+pins what the enrolled sites converged on: the workflow on its ref prefix (build signer URI),
+the repository (source repository URI), the ref prefix (source repository ref), the hosted
+runner, and the issuer. Any other identity is pinned by SAN and issuer:
 
 ```sh
 webcat init --type sigstore \

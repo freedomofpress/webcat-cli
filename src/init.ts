@@ -41,6 +41,23 @@ quorum demo-quorum-rule
 // An identity that names a ref prefix (ending in @refs/tags/ or @refs/heads/) is meant as one: claim it with ^.
 export const tagPrefixIdentity = (identity: string): string => (/@refs\/(tags|heads)\/$/.test(identity) && !identity.startsWith("^") ? `^${identity}` : identity);
 
+// The claims an enrollment pins for an identity. A GitHub Actions workflow gets the set the enrolled sites converged on:
+// the workflow on its ref prefix (build signer), the repository, the ref prefix, the hosted runner, the issuer. Any other
+// identity (an email, another issuer) is pinned by SAN and issuer.
+const WORKFLOW_IDENTITY = /^(\^?)(https:\/\/github\.com\/[^/]+\/[^/]+)\/\.github\/workflows\/[^@]+@(refs\/(?:tags|heads)\/.*)$/;
+export function sigstoreClaims(identity: string, issuer: string): Record<string, string> {
+  const m = WORKFLOW_IDENTITY.exec(identity);
+  if (!m) return { [SAN_OID]: identity, [ISSUER_V2_OID]: issuer };
+  const [, prefix, repository, ref] = m;
+  return {
+    [ISSUER_V2_OID]: issuer,
+    "1.3.6.1.4.1.57264.1.9": identity, // build signer URI: the workflow and its ref, a prefix when ^
+    "1.3.6.1.4.1.57264.1.11": "github-hosted", // runner environment
+    "1.3.6.1.4.1.57264.1.12": repository, // source repository URI
+    "1.3.6.1.4.1.57264.1.14": `${prefix}${ref}`, // source repository ref, the same prefix
+  };
+}
+
 export const DEFAULT_MAX_AGE = 180 * 24 * 60 * 60; // the docs' example: six months
 
 export interface InitOptions {
@@ -226,7 +243,7 @@ export async function runInit(options: InitOptions): Promise<void> {
       : await buildEnrollmentObject({
           type: "sigstore",
           trustedRoot: await fetchCommunityTrustedRoot().then((root) => (a.keepRekorV1 ? root : withoutRekorV1(root))),
-          claims: { [SAN_OID]: a.identity ?? "", [ISSUER_V2_OID]: a.issuer ?? "" },
+          claims: sigstoreClaims(a.identity ?? "", a.issuer ?? ""),
           maxAge: a.maxAge,
         });
 
