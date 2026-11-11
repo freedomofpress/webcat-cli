@@ -9,6 +9,7 @@ import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/inte
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment } from "./enrollment.js";
 import { auditDomain, formatAudit } from "./audit.js";
+import { DEFAULT_MAX_LOG_ENTRIES } from "./rekor.js";
 import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
@@ -707,11 +708,13 @@ program
   .argument("<domain>", "Domain to audit")
   .option("--version <version>", "Only audit this release")
   .option("--built <dir>", "A locally built web root to compare with the manifest (reproducibility, spec manifest.md section 2.2)")
+  .option("--max-log-entries <n>", "Largest Rekor log to read end to end; bigger ones are reported as too big", String(DEFAULT_MAX_LOG_ENTRIES))
   .option("--repro", "Print how to rebuild each release")
   .option("--json", "Print the report as JSON")
   .action(async (domain: string, options) => {
     const report = await auditDomain(domain, {
       built: options.built,
+      maxLogEntries: Number(options.maxLogEntries),
       version: options.version,
       onProgress: process.stderr.isTTY ? (line) => process.stderr.write(`auditing ${line}\n`) : undefined,
     });

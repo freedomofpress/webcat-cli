@@ -969,6 +969,69 @@ describe("audit", () => {
   });
 });
 
+describe("rekor scan", () => {
+  it("reads a private Rekor v1 and v2 end to end, matches certificates against the claims, and skips a log that is too big", async () => {
+    const { auditDomain } = await import("../src/audit");
+    const { certificateMatchesClaims, tilePath } = await import("../src/rekor");
+    const { publishBundle, publishEnrollment } = await import("../src/history");
+    const { createServer } = await import("node:http");
+    expect([tilePath(0), tilePath(5), tilePath(1000), tilePath(760316)]).toEqual(["000", "005", "x001/000", "x760/316"]);
+    const fixture = JSON.parse(await readFile("tests/fixtures/sigstore-bundle.json", "utf8"));
+    const signature = fixture.signatures[0];
+    const der = Buffer.from((signature.verificationMaterial.certificate ?? signature.verificationMaterial.x509CertificateChain.certificates[0]).rawBytes, "base64");
+    const v1Body = Buffer.from(signature.verificationMaterial.tlogEntries[0].canonicalizedBody, "base64");
+    const digestHex = JSON.parse(v1Body.toString()).spec.data.hash.value as string;
+    expect(certificateMatchesClaims(der, fixture.enrollment.claims)).toBe(true);
+    expect(certificateMatchesClaims(der, { ...fixture.enrollment.claims, "1.3.6.1.4.1.57264.1.14": "^refs/tags/" })).toBe(false);
+    expect(certificateMatchesClaims(der, { "1.3.6.1.4.1.57264.1.14": "^refs/heads/" })).toBe(true);
+    // A v2 entry of the same release, and a v2 entry of the same identity whose manifest nobody serves.
+    const v2Entry = (digest: Buffer) =>
+      Buffer.from(JSON.stringify({ apiVersion: "0.0.2", kind: "hashedrekord", spec: { hashedRekordV002: { data: { algorithm: "SHA2_256", digest: digest.toString("base64") }, signature: { content: "", verifier: { x509Certificate: { rawBytes: der.toString("base64") } } } } } }));
+    const bundleOf = (entries: Buffer[]) => Buffer.concat(entries.flatMap((e) => [Buffer.from([e.length >> 8, e.length & 255]), e]));
+    const tile = bundleOf([v2Entry(Buffer.from(digestHex, "hex")), v2Entry(Buffer.alloc(32, 7))]);
+    const root = await mkdtemp(path.join(tmpdir(), "webcat-rekor-"));
+    const server = createServer(async (req, res) => {
+      const url = req.url ?? "/";
+      if (url === "/v1/api/v2/checkpoint" || url === "/big/api/v2/checkpoint" && false) return void (res.statusCode = 404, res.end());
+      if (url === "/v1/api/v1/log") return void res.end(JSON.stringify({ treeSize: 2 }));
+      if (url.startsWith("/v1/api/v1/log/entries?logIndex=")) {
+        const i = Number(url.split("=")[1]);
+        return void res.end(JSON.stringify({ [`uuid${i}`]: { body: i === 0 ? v1Body.toString("base64") : Buffer.from(JSON.stringify({ kind: "dsse", spec: {} })).toString("base64") } }));
+      }
+      if (url === "/v2/api/v2/checkpoint") return void res.end("log\n2\nroot\n");
+      if (url === "/v2/api/v2/tile/entries/000.p/2") return void res.end(tile);
+      if (url === "/big/api/v2/checkpoint") return void res.end("log\n194000000\nroot\n");
+      try {
+        res.end(await readFile(path.join(root, decodeURIComponent(url))));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const enrollment = parseEnrollmentObject({ ...fixture.enrollment, trusted_root: { ...fixture.enrollment.trusted_root, tlogs: [{ baseUrl: `${origin}/v1` }, { baseUrl: `${origin}/v2` }, { baseUrl: `${origin}/big` }] } });
+      const wellKnown = path.join(root, ".well-known/webcat");
+      await publishEnrollment(wellKnown, enrollment);
+      await publishBundle(wellKnown, enrollment, { manifest: fixture.manifest, signatures: fixture.signatures });
+      const report = await auditDomain("lsd.cat", { origin });
+      expect(report.logs).toEqual([
+        `${origin}/v1 (Rekor v1): 2 entries, 1 by this domain's identity`,
+        `${origin}/v2 (Rekor v2): 2 entries, 2 by this domain's identity`,
+        expect.stringContaining("194000000 entries, this log is too big to read end to end"),
+        expect.stringMatching(new RegExp(`^manifest\\.sigstore\\.${digestHex}\\.json: ok \\(entry 0 of ${origin}/v1`)),
+        expect.stringMatching(new RegExp(`^manifest\\.sigstore\\.${digestHex}\\.json: ok \\(entry 0 of ${origin}/v2`)),
+        expect.stringMatching(/^manifest\.sigstore\.0707.*: MISSING \(entry 1 of .*\/v2\)$/),
+      ]);
+      expect(report.releases.map((r) => r.version)).toEqual([fixture.manifest.version]);
+    } finally {
+      server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("enrollment chain client", () => {
   it("solves proof of work challenges", () => {
     const challenge = "ca8dc16136a1df96d1c258bafbb23b096f7e1c28d22da0237dccd05d3c739f0e";

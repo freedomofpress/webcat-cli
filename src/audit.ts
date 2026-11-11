@@ -10,6 +10,7 @@ import { EnrollmentTypes, parseEnrollmentObject } from "./enrollment.js";
 import { gitRemoteTagExists } from "./git.js";
 import { HASH_FILE, WELL_KNOWN_DIR, checkHistory, fetchArchive, manifestFileName, verifyArchiveFiles } from "./history.js";
 import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentObject } from "./manifest.js";
+import { DEFAULT_MAX_LOG_ENTRIES, scanRekorLogs } from "./rekor.js";
 import { causeOf, describeWebcatError, ensureObject, external, sha256 } from "./utils.js";
 
 export interface ReleaseAudit {
@@ -128,7 +129,7 @@ async function loadBundle(url: string): Promise<{ bundle: BundleDocument; verdic
 
 export async function auditDomain(
   domain: string,
-  options: { origin?: string; built?: string; version?: string; onProgress?: (line: string) => void },
+  options: { origin?: string; built?: string; version?: string; maxLogEntries?: number; onProgress?: (line: string) => void },
 ): Promise<AuditReport> {
   const origin = options.origin ?? `https://${bareDomain(domain)}`;
   const wellKnownUrl = (name: string) => `${origin}/${WELL_KNOWN_DIR}/${name}`;
@@ -199,7 +200,29 @@ export async function auditDomain(
       }
     }
   } else {
-    report.logs.push("Rekor scan: work in progress (Rekor v2 tiles); releases taken from the served bundles and archives");
+    // Rekor: every entry whose certificate satisfies the claims of the current or the previous enrollment.
+    const claims = [current.enrollment, ...(previous ? [previous.enrollment] : [])].flatMap((e) => (e.type === EnrollmentTypes.Sigstore ? [e.claims] : []));
+    const tlogs = ((current.enrollment.trusted_root as { tlogs?: Array<{ baseUrl?: string }> }).tlogs ?? []);
+    const scan = await scanRekorLogs(tlogs, claims, options.maxLogEntries ?? DEFAULT_MAX_LOG_ENTRIES, progress);
+    report.logs.push(...scan.lines);
+    for (const hit of scan.hits) {
+      const name = `manifest.sigstore.${hit.digest}.json`;
+      const parsed = await fetchJsonOrNull(wellKnownUrl(name));
+      if (parsed === null) {
+        report.logs.push(`${name}: MISSING (entry ${hit.index} of ${hit.log})`);
+        continue;
+      }
+      try {
+        const stored = parseManifestDocumentObject(parsed);
+        if (sha256(canonicalizeManifestBody(stored)).toString("hex") !== hit.digest) report.logs.push(`${name}: does not hash to its name (entry ${hit.index} of ${hit.log})`);
+        else {
+          report.logs.push(`${name}: ok (entry ${hit.index} of ${hit.log}, version ${stored.manifest.version})`);
+          queue.push(stored);
+        }
+      } catch (err) {
+        report.logs.push(`${name}: ${causeOf(err)}`);
+      }
+    }
   }
 
   // 3. Each release reachable from there: its source tag, its archive, and the history the archive carries.
