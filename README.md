@@ -160,14 +160,6 @@ everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
 `manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
 ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
 
-### Content-addressable storage (deprecated)
-
-Enrollments before schema 1 named a `cas_url`; schema 1 enrollments carry none (spec server.md),
-and auditing moves to the well-known directory. `manifest sign` still writes the two objects
-under `./cas/` (the submitted message and the canonical manifest, named by SHA-256) for sites
-enrolled that way, and uploads them when `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
-`WEBCAT_CAS_S3_TOKEN` are set.
-
 `init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
 or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
 `.well-known/webcat/enrollment.json`, and prints the next steps. Every answer is also a flag,

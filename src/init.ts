@@ -49,7 +49,6 @@ export interface InitOptions {
   policy?: string; // test, production, or a path to a policy file
   keys?: string | number; // generate this many Sigsum keys instead of passing --signer
   threshold?: string | number;
-  casUrl?: string;
   identity?: string;
   issuer?: string;
   keepRekorV1?: boolean; // leave rekor.sigstore.dev in the Sigstore trusted root

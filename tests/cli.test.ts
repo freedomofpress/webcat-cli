@@ -20,7 +20,6 @@ import {
   hexToBase64Url,
   parseInteger,
   toBase64Url,
-  validateCasUrl,
   validateMaxAge,
 } from "../src/utils";
 
@@ -70,13 +69,6 @@ describe("integer and range validation", () => {
       "max_age must be between one week and one year",
     );
     expect(() => validateMaxAge(60 * 60 * 24 * 30, "max_age")).not.toThrow();
-  });
-
-  it("validates CAS URLs", () => {
-    expect(() => validateCasUrl("notaurl", "cas_url")).toThrow("cas_url must be a valid URL");
-    expect(() => validateCasUrl("http://example.com", "cas_url")).toThrow("cas_url must use https://");
-    expect(() => validateCasUrl("https://", "cas_url")).toThrow("cas_url must be a valid URL");
-    expect(() => validateCasUrl("https://example.com", "cas_url")).not.toThrow();
   });
 });
 
@@ -258,28 +250,6 @@ describe("enrollment helpers", () => {
         max_age: 1_000_000,
       }, { authoring: true }),
     ).toThrow("enrollment.claims keys must be OIDs");
-  });
-});
-
-describe("CAS resolution", () => {
-  it("lets an auditor walk from a log entry's checksum to the manifest", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
-    const cwd = process.cwd();
-    process.chdir(dir);
-    try {
-      const canonicalManifest = JSON.stringify({ app: "demo" });
-      const { publishManifestToCas } = await import("../src/cas");
-      await publishManifestToCas(canonicalManifest);
-      // The Sigsum leaf checksum is sha256(message) where message = sha256(manifest); both are CAS object names.
-      const message = createHash("sha256").update(canonicalManifest).digest();
-      const leafChecksumHex = createHash("sha256").update(message).digest("hex");
-      const storedMessage = await readFile(path.join(dir, "cas", leafChecksumHex));
-      expect(storedMessage.equals(message)).toBe(true);
-      expect(await readFile(path.join(dir, "cas", storedMessage.toString("hex")), "utf8")).toBe(canonicalManifest);
-    } finally {
-      process.chdir(cwd);
-      await rm(dir, { recursive: true, force: true });
-    }
   });
 });
 
@@ -570,7 +540,7 @@ describe("init", () => {
   it("writes a config, a policy and a valid enrollment from flags alone", async () => {
     const { runInit, CSP_PRESETS } = await import("../src/init");
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-"));
-    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)], casUrl: "https://example.org/cas/" });
+    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)] });
     const config = JSON.parse(await readFile(path.join(dir, "webcat.config.json"), "utf8"));
     expect(config.app).toBeUndefined();
     expect(config.default_csp).toBe(CSP_PRESETS.static.csp);

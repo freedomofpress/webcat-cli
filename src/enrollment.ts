@@ -66,7 +66,7 @@ export async function buildEnrollmentObject(
 
 // The extension's validators decide what an enrollment is; that is all that is checked on anything read from disk or
 // the network, so the CLI accepts exactly what browsers accept. When authoring (create, init) the CLI adds guards the
-// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, CAS URL, max_age range, logs <-> policy.
+// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, max_age range, logs <-> policy.
 export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {}): Enrollment {
   const e = ensureObject(parsed, "enrollment");
   if (e.type !== EnrollmentTypes.Sigsum && e.type !== EnrollmentTypes.Sigstore) {

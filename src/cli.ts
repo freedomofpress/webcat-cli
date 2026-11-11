@@ -8,7 +8,6 @@ import { Command, CommanderError, Option } from "commander";
 import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEnrollment, loadEnrollment, migrateEnrollment, parseEnrollmentObject } from "./enrollment.js";
-import { publishManifestToCas } from "./cas.js";
 import { gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead, gitTagExists } from "./git.js";
 import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
@@ -146,7 +145,6 @@ program
   .addOption(new Option("--signer <key>", "Existing signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("--keys <n>", "Generate this many Sigsum keys into keys/ with sigsum-key (default when no --signer: 2)").helpGroup(SIGSUM))
   .addOption(new Option("--threshold <k>", "Signatures required").default("1").helpGroup(SIGSUM))
-  .addOption(new Option("--cas-url <url>", "Deprecated, ignored: schema 1 enrollments carry no cas_url").helpGroup(SIGSUM).hideHelp())
   .addOption(new Option("--identity <value>", "Signing identity").helpGroup(SIGSTORE))
   .addOption(new Option("--issuer <url>", "OIDC issuer").helpGroup(SIGSTORE))
   .option("-d, --dir <path>", "Directory to write into", ".")
@@ -230,7 +228,6 @@ const enrollmentCreate = enrollment
   .addOption(new Option("-p, --policy-file <path>", "Sigsum policy file to compile").default("trust_policy").helpGroup(SIGSUM))
   .addOption(new Option("-s, --signer <key>", "Signer public key: hex, base64 or an OpenSSH .pub path (repeatable)").argParser(collect).helpGroup(SIGSUM))
   .addOption(new Option("-t, --threshold <k>", "Threshold for signature approval").helpGroup(SIGSUM))
-  .addOption(new Option("-c, --cas-url <url>", "Deprecated, ignored: schema 1 enrollments carry no cas_url").helpGroup(SIGSUM).hideHelp())
   .addOption(new Option("--trusted-root <path>", "Sigstore trusted root file").helpGroup(SIGSTORE))
   .addOption(new Option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF").helpGroup(SIGSTORE))
   .addOption(new Option("--keep-rekor-v1", `Keep ${DEFAULT_REKOR_URL} (Rekor v1) in the trusted root instead of distrusting it`).helpGroup(SIGSTORE))
@@ -253,7 +250,6 @@ enrollmentCreate.action(async (options) => {
       [options.threshold, "--threshold"],
       [options.maxAge, "--max-age"],
     );
-    if (options.casUrl) log("Warning: --cas-url is deprecated and ignored; schema 1 enrollments carry no cas_url (spec server.md)");
     const policyText = await readText(options.policyFile, "policy");
     enrollmentObject = await buildEnrollmentObject({
       type: "sigsum",
@@ -577,11 +573,6 @@ manifest
         throw invalid(`the signed manifest does not verify against ${options.enrollment}: ${describeWebcatError(result)}; nothing written`);
       }
       log(partial ? `Signed: ${partial.details?.[0]} of ${partial.details?.[1]} required signatures present, sign again with another enrolled key` : `Verified against ${options.enrollment}: ${describeValidity(result)}`);
-    }
-    if (options.type === "sigsum") {
-      const { checksum, manifest: canonical } = await publishManifestToCas(canonicalizeManifestBody(document));
-      log(`Saved Sigsum checksum payload to ${checksum.filePath} (sha256=${checksum.hash}).`);
-      log(`Saved canonical manifest to ${canonical.filePath} (sha256=${canonical.hash}).`);
     }
     await writeOutput(options.output, JSON.stringify(document, null, 2));
   });
