@@ -703,16 +703,14 @@ program
 
 program
   .command("audit")
-  .description("Audit a domain the way the spec's auditors do: served bundles, enrollment history, manifest files, and every release archive reachable from them (files, source tag, history inside); exit 1 on problems")
+  .description("Audit a domain the way the spec's auditors do: served bundles, enrollment history, the Sigsum logs scanned for the signers' leaves, manifest files, and every release archive reachable from them (files, source tag, history inside); exit 1 on problems")
   .argument("<domain>", "Domain to audit")
-  .option("--chain-api <url>", "Chain query API", DEFAULT_CHAIN_API)
   .option("--version <version>", "Only audit this release")
   .option("--built <dir>", "A locally built web root to compare with the manifest (reproducibility, spec manifest.md section 2.2)")
   .option("--repro", "Print how to rebuild each release")
   .option("--json", "Print the report as JSON")
   .action(async (domain: string, options) => {
     const report = await auditDomain(domain, {
-      chainApi: options.chainApi,
       built: options.built,
       version: options.version,
       onProgress: process.stderr.isTTY ? (line) => process.stderr.write(`auditing ${line}\n`) : undefined,

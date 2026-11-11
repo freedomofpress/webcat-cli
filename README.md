@@ -402,7 +402,11 @@ Exits 1 when the bundle does not verify, the enrollment does not match, or any p
 from the outside, with nothing but what the domain serves:
 
 - `bundle.json` and `bundle-prev.json` verified like the extension does;
-- `enrollment.<hash>.json` for every hash the chain or the bundles name, hashing to its name;
+- `enrollment.<hash>.json` for every hash the bundles name, hashing to its name;
+- for Sigsum, the logs the enrollment names read directly (`get-tree-head`, `get-leaves`): every
+  leaf by one of the signers must lead to a served `manifest.sigsum.<checksum>.json`, which is a
+  release. Nothing sits between the CLI and the logs; the whole log is read each run (the test
+  log, 280k leaves, takes about 20 s);
 - `manifest.<type>.<hash>.json` for every served manifest, equal to what the bundle serves;
 - every release reachable from there: the tag on `source`, the `artifact` archive downloaded and
   every path in `files` hashed against the manifest, the well-known directory inside the archive
@@ -418,6 +422,10 @@ webcat audit example.org --version 1.4.0 --built dist   # compare a local build 
 `--built` is the reproducibility check of manifest.md section 2.2: build the release from
 `source` at its tag, then compare the output with the manifest. The build recipe itself is not
 yet specified.
+
+Work in progress, reported as such: the chain's own history of enrollment hashes (a replay, not
+a query API) and the Rekor scan for Sigstore signers. Until then those releases are the ones the
+served bundles and the archives lead to.
 
 ## Exit codes
 

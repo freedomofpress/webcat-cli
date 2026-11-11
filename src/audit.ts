@@ -5,12 +5,12 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/errors";
 import { type BundleDocument, describeValidity, parseBundleObject, verifyBundle } from "./bundle.js";
-import { bareDomain, enrollmentHashHex, fetchDomainStatus } from "./chain.js";
-import { parseEnrollmentObject } from "./enrollment.js";
+import { bareDomain, enrollmentHashHex } from "./chain.js";
+import { EnrollmentTypes, parseEnrollmentObject } from "./enrollment.js";
 import { gitRemoteTagExists } from "./git.js";
 import { HASH_FILE, WELL_KNOWN_DIR, checkHistory, fetchArchive, manifestFileName, verifyArchiveFiles } from "./history.js";
 import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentObject } from "./manifest.js";
-import { causeOf, describeWebcatError, ensureObject, external } from "./utils.js";
+import { causeOf, describeWebcatError, ensureObject, external, sha256 } from "./utils.js";
 
 export interface ReleaseAudit {
   version: string;
@@ -23,7 +23,8 @@ export interface ReleaseAudit {
 export interface AuditReport {
   bundle: string;
   previousBundle: string;
-  enrollments: string[]; // one line per enrollment hash the chain or the bundles name
+  enrollments: string[]; // one line per enrollment hash the bundles name
+  logs: string[]; // the transparency log scan: every leaf by the domain's signers, and whether its manifest is served
   manifests: string[]; // one line per served manifest file
   releases: ReleaseAudit[];
   problems: number;
@@ -44,6 +45,55 @@ export function reproGuideline(domain: string, release: ReleaseAudit): string[] 
 
 // A JSON object, or null when the server has no such file; catch-all servers answer every path with a page, which is
 // no file either. Other failures are reported, not thrown: an audit lists what is wrong.
+// Spec auditing.md 2.2: every leaf in the enrollment's logs signed by one of its signers is a release. The logs are
+// read directly (get-tree-head, get-leaves), with nothing in between; key_hash is the SHA-256 of the raw key.
+// shortcut: the whole log is read on every run (the test log, 280k leaves, takes about 20 s); keep a cursor per log
+// when scans become frequent. Tree heads are not checked against witnesses here: the extension did that when it
+// verified each manifest, and the scan only lists leaves to look up.
+const LEAF_PAGE = 4096;
+export async function scanSigsumLogs(
+  logs: Record<string, string>,
+  signers: string[],
+  onProgress: (line: string) => void = () => {},
+): Promise<{ lines: string[]; leaves: Array<{ log: string; index: number; checksum: string }> }> {
+  const keyHashes = new Set(signers.map((s) => sha256(Buffer.from(s, "base64url")).toString("hex")));
+  const lines: string[] = [];
+  const leaves: Array<{ log: string; index: number; checksum: string }> = [];
+  for (const base of Object.values(logs)) {
+    const url = base.replace(/\/+$/, "");
+    let size: number;
+    try {
+      const head = await (await fetch(`${url}/get-tree-head`)).text();
+      size = Number(/^size=(\d+)$/m.exec(head)?.[1]);
+      if (!Number.isSafeInteger(size)) throw new Error("no size in the tree head");
+    } catch (err) {
+      lines.push(`${url}: not scanned (${causeOf(err)})`);
+      continue;
+    }
+    let found = 0;
+    for (let start = 0; start < size; ) {
+      const end = Math.min(start + LEAF_PAGE, size);
+      onProgress(`scanning ${url} ${start}/${size}`);
+      const page = await (await fetch(`${url}/get-leaves/${start}/${end}`)).text();
+      const entries = page.split("\n").filter((l) => l.startsWith("leaf="));
+      if (entries.length === 0) {
+        lines.push(`${url}: scan stopped at ${start} of ${size} (empty page)`);
+        break;
+      }
+      entries.forEach((entry, i) => {
+        const [checksum, , keyHash] = entry.slice(5).split(" ");
+        if (keyHashes.has(keyHash)) {
+          found++;
+          leaves.push({ log: url, index: start + i, checksum });
+        }
+      });
+      start += entries.length;
+    }
+    lines.push(`${url}: ${size} leaves, ${found} by this domain's signers`);
+  }
+  return { lines, leaves };
+}
+
 async function fetchJsonOrNull(url: string): Promise<Record<string, unknown> | null> {
   const response = await fetch(url).catch((err) => {
     throw external(`failed to fetch ${url}: ${causeOf(err)}`);
@@ -78,7 +128,7 @@ async function loadBundle(url: string): Promise<{ bundle: BundleDocument; verdic
 
 export async function auditDomain(
   domain: string,
-  options: { chainApi: string; origin?: string; built?: string; version?: string; onProgress?: (line: string) => void },
+  options: { origin?: string; built?: string; version?: string; onProgress?: (line: string) => void },
 ): Promise<AuditReport> {
   const origin = options.origin ?? `https://${bareDomain(domain)}`;
   const wellKnownUrl = (name: string) => `${origin}/${WELL_KNOWN_DIR}/${name}`;
@@ -89,13 +139,12 @@ export async function auditDomain(
   const loadedPrevious = await loadBundle(wellKnownUrl("bundle-prev.json")).catch((err) => ({ bundle: null, verdict: `FAILED: ${causeOf(err)}` }));
   const current = loaded.bundle;
   const previous = loadedPrevious?.bundle ?? null;
-  const report: AuditReport = { bundle: loaded.verdict, previousBundle: loadedPrevious?.verdict ?? "none", enrollments: [], manifests: [], releases: [], problems: 0 };
+  const report: AuditReport = { bundle: loaded.verdict, previousBundle: loadedPrevious?.verdict ?? "none", enrollments: [], logs: [], manifests: [], releases: [], problems: 0 };
 
-  // 2.1 Enrollment history: every hash the chain or a served bundle names has its file, and the file hashes to the name.
-  const status = await fetchDomainStatus(options.chainApi, domain).catch((err) => err as Error);
+  // 2.1 Enrollment history: every hash a served bundle names has its file, and the file hashes to the name.
+  // The chain's own history of hashes is not consulted yet: that needs a replay, not a query API.
+  report.enrollments.push("chain history: work in progress; hashes taken from the served bundles");
   const hashes = new Set<string>([enrollmentHashHex(current.enrollment), ...(previous ? [enrollmentHashHex(previous.enrollment)] : [])]);
-  if (status instanceof Error) report.enrollments.push(`chain not consulted: ${status.message}`);
-  else for (const h of [status.canonical, ...status.pending.map((p) => p.hash)]) if (h) hashes.add(h);
   for (const hash of hashes) {
     const name = `enrollment.${hash}.json`;
     const parsed = await fetchJsonOrNull(wellKnownUrl(name));
@@ -124,8 +173,36 @@ export async function auditDomain(
   await expectManifestFile(current, "the manifest in bundle.json");
   if (previous) await expectManifestFile(previous, "the manifest in bundle-prev.json");
 
-  // 3. Each release reachable from the served manifests: its source tag, its archive, and the history the archive carries.
+  // 2.2 and 2.3 Log scan: every leaf by the domain's signers must lead to a served manifest file, which is a release.
   const queue: ManifestDocument[] = [current.manifest, ...(previous ? [previous.manifest] : [])];
+  if (current.enrollment.type === EnrollmentTypes.Sigsum) {
+    const signers = [...new Set([current.enrollment, ...(previous?.enrollment.type === EnrollmentTypes.Sigsum ? [previous.enrollment] : [])].flatMap((e) => e.signers))];
+    const scan = await scanSigsumLogs(current.enrollment.logs, signers, progress);
+    report.logs.push(...scan.lines);
+    for (const leaf of scan.leaves) {
+      const name = `manifest.sigsum.${leaf.checksum}.json`;
+      const parsed = await fetchJsonOrNull(wellKnownUrl(name));
+      if (parsed === null) {
+        report.logs.push(`${name}: MISSING (leaf ${leaf.index} of ${leaf.log})`);
+        continue;
+      }
+      try {
+        const stored = parseManifestDocumentObject(parsed);
+        const digest = sha256(canonicalizeManifestBody(stored));
+        if (sha256(digest).toString("hex") !== leaf.checksum) report.logs.push(`${name}: does not hash to its name (leaf ${leaf.index} of ${leaf.log})`);
+        else {
+          report.logs.push(`${name}: ok (leaf ${leaf.index} of ${leaf.log}, version ${stored.manifest.version})`);
+          queue.push(stored);
+        }
+      } catch (err) {
+        report.logs.push(`${name}: ${causeOf(err)}`);
+      }
+    }
+  } else {
+    report.logs.push("Rekor scan: work in progress (Rekor v2 tiles); releases taken from the served bundles and archives");
+  }
+
+  // 3. Each release reachable from there: its source tag, its archive, and the history the archive carries.
   const seen = new Set<string>();
   while (queue.length) {
     const document = queue.shift()!;
@@ -181,14 +258,14 @@ export async function auditDomain(
   }
   report.problems =
     report.releases.reduce((n, r) => n + r.problems.length, 0) +
-    [...report.enrollments, ...report.manifests].filter((l) => /MISSING|does not hash|differs|not JSON/.test(l)).length +
+    [...report.enrollments, ...report.logs, ...report.manifests].filter((l) => /MISSING|does not hash|differs|not JSON/.test(l)).length +
     (report.bundle.startsWith("FAILED") ? 1 : 0);
   return report;
 }
 
 export function formatAudit(domain: string, report: AuditReport, repro: boolean): string {
   const out: string[] = [`Domain: ${domain}`, `bundle.json: ${report.bundle}`, `bundle-prev.json: ${report.previousBundle}`, "", "Enrollment history:"];
-  out.push(...report.enrollments.map((l) => `  ${l}`), "", "Manifest files:", ...report.manifests.map((l) => `  ${l}`), "", "Releases:");
+  out.push(...report.enrollments.map((l) => `  ${l}`), "", "Manifest files:", ...report.manifests.map((l) => `  ${l}`), "", "Transparency logs:", ...report.logs.map((l) => `  ${l}`), "", "Releases:");
   for (const r of report.releases) {
     out.push(`  ${r.version}${r.source ? `  source ${r.source}` : ""}${r.artifact ? `  artifact ${artifactUrl(r.artifact, r.version)}` : ""}`);
     out.push(...r.problems.map((p) => `    PROBLEM: ${p}`), ...r.notes.map((n) => `    note: ${n}`));
