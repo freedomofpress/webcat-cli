@@ -20,6 +20,16 @@ export function forgeOf(source: string | undefined): Forge | null {
   }
 }
 
+// Whether the public Sigstore CA certifies the identities this remote's CI issues: GitHub and gitlab.com do, nothing
+// self-hosted does, and Forgejo and Gitea issue none. Elsewhere Sigsum is the signing that works from CI.
+export const sigstoreFromCi = (source: string | undefined): boolean => {
+  try {
+    return ["github.com", "gitlab.com"].includes(new URL(source ?? "").host);
+  } catch {
+    return false;
+  }
+};
+
 // {{name}} is a value; {{#name}}...{{/name}} is kept when the value is true, dropped otherwise (a whole line when alone on it).
 export function render(template: string, vars: Record<string, string | boolean>): string {
   return template
@@ -40,18 +50,20 @@ export interface CiOptions {
   directory: string;
   token: boolean; // a rate-limit token key for the production Sigsum logs
   artifact: boolean; // an archive to publish
+  oidc: boolean; // the CI issues an identity the public Sigstore CA certifies (sigstoreFromCi)
 }
 
-// The files to write, relative to the repository root, with null for a job the CI system cannot run
-// (Forgejo and Gitea Actions issue no OIDC identity, so a Sigstore site there signs elsewhere).
+// The files to write, relative to the repository root, with null for a release job the CI cannot run: Sigstore where
+// the CI issues no identity the public CA certifies.
 export function ciJobs(o: CiOptions): Array<[file: string, text: string | null]> {
   const vars = { host: o.host, directory: o.directory, cli_version: CLI_VERSION, token: o.token, artifact: o.artifact };
+  const canSign = o.type === "sigsum" || o.oidc;
   switch (o.forge) {
     case "gitlab":
-      return [[".gitlab-ci.yml", render(template("gitlab", `ci-${o.type}`), vars)]];
+      return [[".gitlab-ci.yml", canSign ? render(template("gitlab", `ci-${o.type}`), vars) : null]];
     case "forgejo":
       return [
-        [".forgejo/workflows/webcat-release.yml", o.type === "sigsum" ? render(template("forgejo", "release-sigsum"), vars) : null],
+        [".forgejo/workflows/webcat-release.yml", canSign ? render(template("forgejo", `release-${o.type}`), vars) : null],
         [".forgejo/workflows/webcat-verify.yml", render(template("forgejo", "verify"), vars)],
       ];
     case "github":

@@ -602,9 +602,10 @@ jobs:
 
 #### GitLab CI, Sigstore or Sigsum
 
-One `.gitlab-ci.yml` carries both jobs. GitLab runners issue an OIDC token, so Sigstore signs
-there too; archives go to the project's generic package registry, which is what `artifact`
-points at.
+One `.gitlab-ci.yml` carries both jobs. gitlab.com runners issue an OIDC token the public
+Sigstore CA certifies, so Sigstore signs there too; archives go to the project's generic package
+registry, which is what `artifact` points at. A self-hosted GitLab, like Forgejo and Gitea, has
+no such identity: `init` says so and the Sigsum job is the one that works there.
 
 ```yaml
 # .gitlab-ci.yml

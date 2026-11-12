@@ -579,15 +579,20 @@ describe("init", () => {
     // The renderer: values, and blocks kept or dropped whole, whether they own a line or sit inline.
     expect(render("a {{x}}\n{{#t}}\nkept\n{{/t}}\n{{#f}}\ndropped\n{{/f}}\nb{{#t}} in{{/t}}{{#f}} out{{/f}}\n", { x: "1", t: true, f: false })).toBe("a 1\nkept\nb in\n");
     // Sigsum on a Forgejo: the key secrets and the forge's own actions; Sigstore there has no identity to sign with.
-    const forgejo = ciJobs({ forge: "forgejo", type: "sigsum", host: "example.org", directory: "dist", token: true, artifact: true });
+    const forgejo = ciJobs({ forge: "forgejo", type: "sigsum", host: "example.org", directory: "dist", token: true, artifact: true, oidc: false });
     expect(forgejo.map(([f]) => f)).toEqual([".forgejo/workflows/webcat-release.yml", ".forgejo/workflows/webcat-verify.yml"]);
     expect(forgejo[0][1]).toContain("SIGSUM_TOKEN_KEY");
     expect(forgejo[0][1]).toContain("--token-domain example.org");
     expect(forgejo[0][1]).toContain("code.forgejo.org/actions/checkout");
     expect(forgejo[0][1]).not.toMatch(/\{\{[#/]?\w+\}\}/); // ${{ secrets.X }} is GitHub syntax and stays
-    expect(ciJobs({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", token: false, artifact: false })[0][1]).toBeNull();
-    // GitLab: one file, the id token for Sigstore, no archive upload without an artifact.
-    const gitlab = ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false });
+    expect(ciJobs({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", token: false, artifact: false, oidc: false })[0][1]).toBeNull();
+    // Only GitHub and gitlab.com issue identities the public Sigstore CA certifies; a self-hosted GitLab gets no Sigstore job.
+    const { sigstoreFromCi } = await import("../src/ci");
+    expect([sigstoreFromCi("https://github.com/o/r"), sigstoreFromCi("https://gitlab.com/o/r"), sigstoreFromCi("https://git.example.org/o/r"), sigstoreFromCi(undefined)]).toEqual([true, true, false, false]);
+    expect(ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false, oidc: false })[0][1]).toBeNull();
+    expect(ciJobs({ forge: "gitlab", type: "sigsum", host: "example.org", directory: "public", token: false, artifact: false, oidc: false })[0][1]).toContain("webcat release -k keys/key1");
+    // GitLab.com: one file, the id token for Sigstore, no archive upload without an artifact.
+    const gitlab = ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false, oidc: true });
     expect(gitlab.map(([f]) => f)).toEqual([".gitlab-ci.yml"]);
     expect(gitlab[0][1]).toContain("SIGSTORE_ID_TOKEN");
     expect(gitlab[0][1]).not.toContain("--upload-file"); // no archive to publish
