@@ -1,8 +1,8 @@
 // Rekor as a history source (spec auditing.md 2.2, Sigstore): every entry whose certificate satisfies the enrollment's
 // claims is a release. A v1 log is read one entry at a time, its only listing API; a v2 log by entry tiles
 // (C2SP tlog-tiles, 256 entries each). Nothing sits between the CLI and the log.
-// shortcut: the whole log is read on every run, so a log above --max-log-entries is skipped with a TODO; the public
-// Sigstore logs (hundreds of millions of entries) always are. The upgrade is an index of certificate identities.
+// shortcut: the whole log is read on every run, so a log above --max-log-entries is skipped and reported as needing an
+// index (TODO); the public Sigstore logs, hundreds of millions of entries, always are.
 import { X509Certificate } from "@freedomofpress/sigstore-browser";
 import { causeOf } from "./utils.js";
 
@@ -120,8 +120,7 @@ export async function scanRekorLogs(
       continue;
     }
     if (size > maxEntries) {
-      const which = /\.sigstore\.dev$/.test(new URL(base).host) ? "the public Sigstore log" : "this log";
-      lines.push(`${base}: ${size} entries, ${which} is too big to read end to end (limit ${maxEntries}, --max-log-entries); TODO: an index of certificate identities`);
+      lines.push(`${base}: ${size} entries, above --max-log-entries ${maxEntries}; scanning this log requires an index (TODO)`);
       continue;
     }
     const before = hits.length;

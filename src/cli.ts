@@ -708,7 +708,7 @@ program
   .argument("<domain>", "Domain to audit")
   .option("--version <version>", "Only audit this release")
   .option("--built <dir>", "A locally built web root to compare with the manifest (reproducibility, spec manifest.md section 2.2)")
-  .option("--max-log-entries <n>", "Largest Rekor log to read end to end; bigger ones are reported as too big", String(DEFAULT_MAX_LOG_ENTRIES))
+  .option("--max-log-entries <n>", "Largest Rekor log to read end to end; a bigger one is reported as needing an index", String(DEFAULT_MAX_LOG_ENTRIES))
   .option("--repro", "Print how to rebuild each release")
   .option("--json", "Print the report as JSON")
   .action(async (domain: string, options) => {

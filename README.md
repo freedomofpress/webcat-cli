@@ -426,9 +426,9 @@ yet specified.
 For Sigstore, every Rekor the enrollment's trusted root names is read the same way, v1 one
 entry at a time (its only listing API) and v2 by entry tiles, and every entry whose certificate
 satisfies the claims must lead to a served `manifest.sigstore.<hash>.json`. That is for private
-deployments: a log above `--max-log-entries` (200,000) is reported as too big to read end to
-end, which the public Sigstore logs always are at hundreds of millions of entries. An index of
-certificate identities is the TODO there. The chain's own history of enrollment hashes is also
+deployments: a log above `--max-log-entries` (200,000 unless overridden) is skipped and
+reported as "scanning this log requires an index (TODO)", which the public Sigstore logs always
+are at hundreds of millions of entries. The index is specified later. The chain's own history of enrollment hashes is also
 work in progress and reported as such; it needs a replay, not a query API.
 
 ## Exit codes

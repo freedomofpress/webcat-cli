@@ -1019,7 +1019,7 @@ describe("rekor scan", () => {
       expect(report.logs).toEqual([
         `${origin}/v1 (Rekor v1): 2 entries, 1 by this domain's identity`,
         `${origin}/v2 (Rekor v2): 2 entries, 2 by this domain's identity`,
-        expect.stringContaining("194000000 entries, this log is too big to read end to end"),
+        `${origin}/big: 194000000 entries, above --max-log-entries 200000; scanning this log requires an index (TODO)`,
         expect.stringMatching(new RegExp(`^manifest\\.sigstore\\.${digestHex}\\.json: ok \\(entry 0 of ${origin}/v1`)),
         expect.stringMatching(new RegExp(`^manifest\\.sigstore\\.${digestHex}\\.json: ok \\(entry 0 of ${origin}/v2`)),
         expect.stringMatching(/^manifest\.sigstore\.0707.*: MISSING \(entry 1 of .*\/v2\)$/),
