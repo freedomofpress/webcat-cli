@@ -1,19 +1,26 @@
-import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { SerializedBundle } from "@sigstore/bundle";
 import type { Manifest, SigsumSignatures } from "@freedomofpress/webcat/webcat/interfaces/bundle";
-import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
+import { canonicalForm, hasSchema } from "@freedomofpress/webcat/webcat/canonicalize";
 import { validateCSP, validateManifest } from "@freedomofpress/webcat/webcat/validators";
 import { causeOf, check, ensureObject, invalid, readJson, sha256, toBase64Url, validateAll } from "./utils.js";
 
 export type ManifestContent = Manifest;
-// What webcat.config.json holds: fallbacks are paths here and hashes in the manifest.
-export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "default_index" | "default_fallback" | "fallback_hashes"> & {
+// What webcat.config.json holds: fallbacks are paths here and hashes in the manifest. app is accepted and ignored.
+export type ManifestConfig = Omit<ManifestContent, "files" | "timestamp" | "version" | "manifest_schema" | "default_index" | "default_fallback" | "fallback_hashes"> & {
+  version?: string; // absent when the release tag at HEAD is the version
+  directory?: string; // where the built site lives (CLI-only, never in the manifest)
+  origin?: string; // https origin of the site (CLI-only): where release inherits the history from when no archive has it
+  clean_urls?: boolean; // the host serves /page.html at /page too (Vercel, Netlify, Cloudflare Pages): list both
   default_index: string;
   fallbacks: string[];
 };
 
-// Where each fallback is published under its hash, so auditors can find what the manifest accepts.
+// Spec manifest.md: a schema 1 manifest's version is a semantic version; a leading v (git tags) is tolerated.
+const SEMVER = /^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+
+// Where each fallback is served under its hash (bundle create publishes them), so auditors can find what the manifest accepts.
 export const HASHES_PATH = "/.well-known/webcat/hashes/";
 export type ManifestSignatures = SigsumSignatures | SerializedBundle[];
 
@@ -53,10 +60,17 @@ const isRecordOfStrings = (value: unknown): value is Record<string, string> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every((v) => typeof v === "string");
 
 // Everything the extension checks on a manifest, plus its CSP rules on every policy string, plus `more`.
-export function validateManifestContent(manifest: ManifestContent, subject = "manifest", more: Array<() => void> = []): void {
+// policy: false skips the CSP rules, which are the extension's runtime policy of the day, not part of what was signed;
+// a history record is parsed that way, a manifest being written is not.
+export function validateManifestContent(manifest: ManifestContent, subject = "manifest", more: Array<() => void> = [], { policy = true } = {}): void {
   const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp ?? {}).map(([k, v]) => [`extra_csp['${k}']`, v])];
   validateAll([
     () => check(validateManifest(manifest), subject),
+    () => {
+      if (hasSchema(manifest) && !SEMVER.test(String(manifest.version))) {
+        throw invalid(`${subject}.version must be a semantic version such as 1.4.0, got '${manifest.version}'`);
+      }
+    },
     ...more,
     // Extensions before 3.2.0 require both and reject a manifest whose entries do not resolve (#263).
     () => {
@@ -73,6 +87,7 @@ export function validateManifestContent(manifest: ManifestContent, subject = "ma
       if (typeof csp !== "string") {
         throw invalid(`${subject}.${field} must be a CSP string`);
       }
+      if (!policy) return;
       try {
         validateCSP(csp);
       } catch (err) {
@@ -95,15 +110,13 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   c.default_index ??= "index.html";
   // default_fallback is the pre-3.2.0 spelling of a single fallback (#263).
   const fallbacks = c.fallbacks ?? (c.default_fallback === undefined ? [`/${String(c.default_index).replace(/^\/+/, "")}`] : [c.default_fallback]);
+  const optional = (key: string): string | undefined => (c[key] === undefined ? undefined : str(key));
   validateAll([
+    ...["default_csp", "default_index"].map((key) => () => str(key)),
+    ...["version", "source", "artifact", "directory", "origin"].map((key) => () => optional(key)),
     () => {
-      try {
-        new URL(str("app"));
-      } catch (err) {
-        throw invalid(`config.app must be a valid URL: ${causeOf(err)}`);
-      }
+      if (c.clean_urls !== undefined && typeof c.clean_urls !== "boolean") throw invalid("config.clean_urls must be true or false");
     },
-    ...["version", "default_csp", "default_index"].map((key) => () => str(key)),
     () => {
       if (!Array.isArray(fallbacks) || !fallbacks.every((f) => typeof f === "string" && f.startsWith("/"))) {
         throw invalid("config.fallbacks must be an array of '/'-prefixed paths");
@@ -122,8 +135,12 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   ]);
   // CSP, index and fallback are checked with the extension's rules once the manifest is built.
   return {
-    app: str("app"),
-    version: str("version"),
+    ...(c.source !== undefined ? { source: str("source") } : {}),
+    ...(c.artifact !== undefined ? { artifact: str("artifact") } : {}),
+    ...(c.version !== undefined ? { version: str("version") } : {}),
+    ...(c.directory !== undefined ? { directory: str("directory") } : {}),
+    ...(c.origin !== undefined ? { origin: str("origin") } : {}),
+    ...(c.clean_urls ? { clean_urls: true } : {}),
     default_csp: str("default_csp"),
     default_index: str("default_index").replace(/^\/+/, ""), // appended to directory paths
     fallbacks: fallbacks as string[],
@@ -173,26 +190,27 @@ export async function scanDirectory(rootDir: string, options: DirectoryScanOptio
   return result;
 }
 
-// A 3.2.0 manifest (directory keys, fallback_hashes) that extensions before 3.2.0 still read through
-// default_index and default_fallback (#263); drop those two once such extensions are gone.
-// shortcut: every index file is listed next to its directory key, as pre-3.2.0 extensions resolve "/"
-// through "/index.html"; when the two legacy fields go, add a config switch to list the directory key only.
-export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
+// A schema 1 manifest (spec manifest.md): directory keys and fallback_hashes, no app, default_index or
+// default_fallback, whatever schema the enrollment has. Extensions from 3.2.0 read it; 3.3.0 hashes it under JCS.
+export function buildManifest(config: ManifestConfig & { version: string }, scan: DirectoryScanResult, timestamp?: string): ManifestContent {
   const files = Object.fromEntries(scan.files);
   const suffix = `/${config.default_index}`;
   for (const p of Object.keys(files)) {
     if (p.endsWith(suffix)) files[p.slice(0, 1 - suffix.length)] ??= files[p];
   }
+  if (config.clean_urls) {
+    for (const p of Object.keys(files)) if (p.endsWith(".html") && !p.endsWith(`/${config.default_index}`)) files[p.slice(0, -5)] ??= files[p];
+  }
   const fallbacks = config.fallbacks.filter((p) => files[p]); // the missing ones are reported below
   const fallback_hashes = fallbacks.map((p) => files[p]);
   const manifest: ManifestContent = {
-    app: config.app,
+    manifest_schema: 1,
+    ...(config.source !== undefined ? { source: config.source } : {}),
+    ...(config.artifact !== undefined ? { artifact: config.artifact } : {}),
     version: config.version,
     default_csp: config.default_csp,
     files: sortedEntries(files),
     ...(fallback_hashes.length ? { fallback_hashes } : {}),
-    default_index: config.default_index,
-    ...(fallbacks.length ? { default_fallback: fallbacks[0] } : {}),
     wasm: Array.from(new Set([...config.wasm, ...scan.wasm])).sort(),
     extra_csp: sortedEntries(config.extra_csp),
     ...(timestamp ? { timestamp } : {}),
@@ -207,18 +225,6 @@ export function buildManifest(config: ManifestConfig, scan: DirectoryScanResult,
   return manifest;
 }
 
-// Copies each fallback to <directory>/.well-known/webcat/hashes/<hash>; returns the paths written.
-export async function writeFallbackCopies(directory: string, config: ManifestConfig, manifest: ManifestContent): Promise<string[]> {
-  const written: string[] = [];
-  for (const p of config.fallbacks) {
-    const target = `${HASHES_PATH}${manifest.files[p]}`;
-    await mkdir(path.join(directory, HASHES_PATH), { recursive: true });
-    await copyFile(path.join(directory, p), path.join(directory, target));
-    written.push(target);
-  }
-  return written;
-}
-
 // The manifest as a 3.2.0 extension reads it: legacy default_index and default_fallback rewritten
 // into directory keys and fallback_hashes, explicit values winning.
 export function effectiveManifest(manifest: ManifestContent): ManifestContent {
@@ -231,6 +237,16 @@ export function effectiveManifest(manifest: ManifestContent): ManifestContent {
   }
   const fallback_hashes = manifest.fallback_hashes ?? (manifest.default_fallback ? [manifest.files[manifest.default_fallback]].filter(Boolean) : []);
   return { ...manifest, files, fallback_hashes };
+}
+
+// Schema 0 -> 1 (spec manifest.md): the legacy fields become directory keys and fallback_hashes, app goes, and the
+// version must already be a semantic version. Changes the signed bytes, so only for a manifest not yet signed.
+export function migrateManifest(manifest: ManifestContent): ManifestContent {
+  if (hasSchema(manifest)) return manifest;
+  const { app: _app, default_index: _index, default_fallback: _fallback, ...rest } = effectiveManifest(manifest);
+  const migrated: ManifestContent = { manifest_schema: 1, ...rest };
+  validateManifestContent(migrated, "manifest");
+  return migrated;
 }
 
 function parseManifestSignatures(value: unknown): ManifestSignatures | undefined {
@@ -253,7 +269,7 @@ function parseManifestSignatures(value: unknown): ManifestSignatures | undefined
   return inner;
 }
 
-export function parseManifestDocumentObject(parsed: unknown): ManifestDocument {
+export function parseManifestDocumentObject(parsed: unknown, { policy = true } = {}): ManifestDocument {
   const document = ensureObject(parsed, "manifest");
   const manifest = ensureObject(document.manifest, "manifest.manifest");
   manifest.wasm ??= [];
@@ -261,19 +277,20 @@ export function parseManifestDocumentObject(parsed: unknown): ManifestDocument {
   if (!isRecordOfStrings(manifest.extra_csp)) {
     throw invalid("manifest.manifest.extra_csp must map path prefixes to CSP strings");
   }
-  validateManifestContent(manifest as unknown as ManifestContent, "manifest.manifest");
+  validateManifestContent(manifest as unknown as ManifestContent, "manifest.manifest", [], { policy });
   return { manifest: manifest as unknown as ManifestContent, signatures: parseManifestSignatures(document.signatures) };
 }
 
 export const loadManifestDocument = async (manifestPath: string): Promise<ManifestDocument> =>
   parseManifestDocumentObject(await readJson(manifestPath, "manifest"));
 
+// JCS from manifest_schema 1, OLPC for manifests that predate it (spec server.md section 1.0), as the extension hashes them.
 export function canonicalizeManifestBody(document: ManifestDocument): string {
-  const canonical = canonicalize(document.manifest);
-  if (canonical === null) {
-    throw invalid("manifest.manifest must contain only strings, integers, booleans, null, arrays and objects");
+  try {
+    return canonicalForm(document.manifest);
+  } catch (err) {
+    throw invalid(`manifest.manifest must contain only strings, integers, booleans, null, arrays and objects: ${causeOf(err)}`);
   }
-  return canonical;
 }
 
 export const manifestHash = (document: ManifestDocument): Buffer => sha256(canonicalizeManifestBody(document));

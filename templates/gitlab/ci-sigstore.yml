@@ -1,0 +1,31 @@
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# Archives go to the generic package registry: artifact in webcat.config.json is
+# $CI_API_V4_URL/projects/<id>/packages/generic/site/${version}/site-${version}.tar.gz
+image: node:22
+
+release:
+  rules:
+    - if: $CI_COMMIT_TAG
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - npm ci && npm run build                          # must produce {{directory}}/
+    - npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+    - webcat release --type sigstore --oidc-token "$SIGSTORE_ID_TOKEN"
+{{#artifact}}
+    - 'curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file site-$CI_COMMIT_TAG.tar.gz "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/site/$CI_COMMIT_TAG/site-$CI_COMMIT_TAG.tar.gz"'
+{{/artifact}}
+    - cp -r .well-known {{directory}}/
+    # deploy {{directory}}/ as usual; the verify job then checks what visitors and auditors see
+
+verify:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+    - webcat site check {{host}}
+    - webcat audit {{host}}

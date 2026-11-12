@@ -1,0 +1,36 @@
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# CI/CD variables (file type, protected): SIGSUM_KEY, the private signing key{{#token}}; SIGSUM_TOKEN_KEY, the rate-limit token key{{/token}}.
+# Archives go to the generic package registry: artifact in webcat.config.json is
+# $CI_API_V4_URL/projects/<id>/packages/generic/site/${version}/site-${version}.tar.gz
+image: node:22
+
+release:
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq golang-go >/dev/null
+    - go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && export PATH="$HOME/go/bin:$PATH"
+  script:
+    - npm ci && npm run build                          # must produce {{directory}}/
+    - npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+    - install -m 600 "$SIGSUM_KEY" keys/key1
+{{#token}}
+    - install -m 600 "$SIGSUM_TOKEN_KEY" keys/token
+{{/token}}
+    - webcat release -k keys/key1{{#token}} --token-signing-key keys/token --token-domain {{host}}{{/token}}
+{{#artifact}}
+    - 'curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file site-$CI_COMMIT_TAG.tar.gz "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/site/$CI_COMMIT_TAG/site-$CI_COMMIT_TAG.tar.gz"'
+{{/artifact}}
+    - cp -r .well-known {{directory}}/
+    # deploy {{directory}}/ as usual; the verify job then checks what visitors and auditors see
+
+verify:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+    - webcat site check {{host}}
+    - webcat audit {{host}}

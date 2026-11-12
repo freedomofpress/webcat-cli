@@ -1,6 +1,6 @@
 {
   "name": "@freedomofpress/webcat-cli",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "WEBCAT CLI for creating, validating, and packaging enrollments and manifests.",
   "license": "MIT",
   "engines": {
@@ -15,7 +15,8 @@
     "webcat": "dist/cli.cjs"
   },
   "files": [
-    "dist/cli.cjs"
+    "dist/cli.cjs",
+    "templates"
   ],
   "scripts": {
     "start": "tsx src/cli.ts",
@@ -28,12 +29,12 @@
     "access": "public"
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.1145.0",
     "@freedomofpress/cometbft": "^0.2.0",
+    "@freedomofpress/crypto-browser": "^0.3.0",
     "@freedomofpress/ics23": "^0.2.0",
     "@freedomofpress/sigstore-browser": "^0.1.15",
     "@freedomofpress/sigsum": "^0.4.0",
-    "@freedomofpress/webcat": "^3.2.0",
+    "@freedomofpress/webcat": "^3.3.0",
     "@sigstore/bundle": "^5.0.0",
     "@sigstore/sign": "^5.0.0",
     "@types/node": "^22.20.5",

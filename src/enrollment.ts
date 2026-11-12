@@ -1,5 +1,5 @@
 import { EnrollmentTypes, type Enrollment, type SigsumEnrollment, type SigstoreEnrollment } from "@freedomofpress/webcat/webcat/interfaces/bundle";
-import { canonicalize } from "@freedomofpress/webcat/webcat/canonicalize";
+import { canonicalizeJCS } from "@freedomofpress/crypto-browser";
 import { validateSigstoreEnrollment, validateSigsumEnrollment } from "@freedomofpress/webcat/webcat/validators";
 import { parseCompiledPolicy } from "@freedomofpress/sigsum/dist/compiledPolicy.js";
 import {
@@ -14,7 +14,6 @@ import {
   readText,
   toBase64Url,
   validateAll,
-  validateCasUrl,
   validateMaxAge,
 } from "./utils.js";
 
@@ -48,33 +47,32 @@ export function signerFromOpenSsh(line: string): string {
 export const signerFromValue = async (value: string): Promise<string> =>
   value.endsWith(".pub") ? signerFromOpenSsh(await readText(value, "signer public key")) : parseSignerKey(value);
 
-// CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated enrollment.
+// CLI-flag shape (camelCase, signers as hex, base64 or OpenSSH .pub paths) -> validated schema 1 enrollment (spec server.md).
 export async function buildEnrollmentObject(
   o:
-    | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; casUrl: string; logs?: Record<string, string> }
+    | { type?: "sigsum"; policy: string; signers: string[]; threshold: number | string; maxAge: number | string; logs?: Record<string, string> }
     | { type: "sigstore"; trustedRoot: unknown; claims: unknown; maxAge: number | string },
 ): Promise<Enrollment> {
   const max_age = parseInteger(o.maxAge, "--max-age");
   if (o.type === "sigstore") {
-    return parseEnrollmentObject({ type: "sigstore", trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
+    return parseEnrollmentObject({ type: "sigstore", enrollment_schema: 1, trusted_root: o.trustedRoot, claims: o.claims, max_age }, { authoring: true });
   }
   const signers = await Promise.all(o.signers.map(signerFromValue));
-  return parseEnrollmentObject({ type: "sigsum", policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, cas_url: o.casUrl, logs: o.logs }, { authoring: true });
+  return parseEnrollmentObject(
+    { type: "sigsum", enrollment_schema: 1, policy: o.policy, signers, threshold: parseInteger(o.threshold, "--threshold"), max_age, logs: o.logs },
+    { authoring: true },
+  );
 }
 
 // The extension's validators decide what an enrollment is; that is all that is checked on anything read from disk or
 // the network, so the CLI accepts exactly what browsers accept. When authoring (create, init) the CLI adds guards the
-// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, CAS URL, max_age range, logs <-> policy.
+// extension has no reason to enforce: key encoding, duplicate signers, OID claim keys, max_age range, logs <-> policy.
 export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {}): Enrollment {
   const e = ensureObject(parsed, "enrollment");
   if (e.type !== EnrollmentTypes.Sigsum && e.type !== EnrollmentTypes.Sigstore) {
     throw invalid("enrollment.type must be 'sigsum' or 'sigstore'; browsers reject enrollments without it");
   }
-  const encodable = () => {
-    if (canonicalize(e) === null) {
-      throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
-    }
-  };
+  const encodable = () => canonicalizeEnrollment(e as unknown as Enrollment);
   if (e.type === EnrollmentTypes.Sigstore) {
     const enrollment = e as unknown as SigstoreEnrollment;
     validateAll([
@@ -108,7 +106,6 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
               throw invalid("enrollment.signers must not contain duplicates");
             }
           },
-          () => validateCasUrl(String(enrollment.cas_url), "enrollment.cas_url"),
           () => validateMaxAge(enrollment.max_age, "enrollment.max_age"),
           () => {
             if (policyLogs instanceof Error) {
@@ -138,13 +135,22 @@ export function parseEnrollmentObject(parsed: unknown, { authoring = false } = {
   return enrollment;
 }
 
+// Schema 0 -> 1 (spec server.md): enrollment_schema 1 and no cas_url. Signers, policy, threshold, claims and trusted
+// root are untouched, so manifests signed under the old enrollment verify under the new one; only the hash changes.
+export function migrateEnrollment(enrollment: Enrollment): Enrollment {
+  if (enrollment.enrollment_schema !== undefined) return enrollment;
+  const { cas_url: _cas, ...rest } = enrollment as SigsumEnrollment;
+  return parseEnrollmentObject({ ...rest, enrollment_schema: 1 }, { authoring: true });
+}
+
 // Same canonical form the oracles and the extension hash.
+// The extension hashes every enrollment under JCS (originstate.ts), whatever its schema.
 export function canonicalizeEnrollment(enrollment: Enrollment): string {
-  const canonical = canonicalize(enrollment);
-  if (canonical === null) {
-    throw invalid("enrollment must contain only strings, integers, booleans, null, arrays and objects");
+  try {
+    return canonicalizeJCS(enrollment);
+  } catch (err) {
+    throw invalid(`enrollment must contain only strings, integers, booleans, null, arrays and objects: ${causeOf(err)}`);
   }
-  return canonical;
 }
 
 export const loadEnrollment = async (path: string): Promise<Enrollment> => parseEnrollmentObject(await readJson(path, "enrollment"));

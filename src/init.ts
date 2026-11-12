@@ -7,8 +7,11 @@ import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
+import { ciIssuer, ciJobs, forgeOf, sigstoreFromCi } from "./ci.js";
+import { gitRemote, gitTagAtHead } from "./git.js";
+import { WELL_KNOWN_DIR, publishEnrollment } from "./history.js";
 import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
-import { causeOf, invalid, log, readText, validateAll, validateCasUrl } from "./utils.js";
+import { causeOf, invalid, log, readText, validateAll } from "./utils.js";
 
 export const CSP_PRESETS: Record<string, { title: string; csp: string }> = {
   static: {
@@ -35,6 +38,26 @@ group  demo-quorum-rule any poc.sigsum.org/nisse rgdd.se/poc-witness
 quorum demo-quorum-rule
 `;
 
+// An identity that names a ref prefix (ending in @refs/tags/ or @refs/heads/) is meant as one: claim it with ^.
+export const tagPrefixIdentity = (identity: string): string => (/@refs\/(tags|heads)\/$/.test(identity) && !identity.startsWith("^") ? `^${identity}` : identity);
+
+// The claims an enrollment pins for an identity. A GitHub Actions workflow gets the set the enrolled sites converged on:
+// the workflow on its ref prefix (build signer), the repository, the ref prefix, the hosted runner, the issuer. Any other
+// identity (an email, another issuer) is pinned by SAN and issuer.
+const WORKFLOW_IDENTITY = /^(\^?)(https:\/\/github\.com\/[^/]+\/[^/]+)\/\.github\/workflows\/[^@]+@(refs\/(?:tags|heads)\/.*)$/;
+export function sigstoreClaims(identity: string, issuer: string): Record<string, string> {
+  const m = WORKFLOW_IDENTITY.exec(identity);
+  if (!m) return { [SAN_OID]: identity, [ISSUER_V2_OID]: issuer };
+  const [, prefix, repository, ref] = m;
+  return {
+    [ISSUER_V2_OID]: issuer,
+    "1.3.6.1.4.1.57264.1.9": identity, // build signer URI: the workflow and its ref, a prefix when ^
+    "1.3.6.1.4.1.57264.1.11": "github-hosted", // runner environment
+    "1.3.6.1.4.1.57264.1.12": repository, // source repository URI
+    "1.3.6.1.4.1.57264.1.14": `${prefix}${ref}`, // source repository ref, the same prefix
+  };
+}
+
 export const DEFAULT_MAX_AGE = 180 * 24 * 60 * 60; // the docs' example: six months
 
 export interface InitOptions {
@@ -47,10 +70,13 @@ export interface InitOptions {
   policy?: string; // test, production, or a path to a policy file
   keys?: string | number; // generate this many Sigsum keys instead of passing --signer
   threshold?: string | number;
-  casUrl?: string;
   identity?: string;
   issuer?: string;
   keepRekorV1?: boolean; // leave rekor.sigstore.dev in the Sigstore trusted root
+  source?: string; // git repository URL; "" for closed source
+  artifact?: string; // release archive URL template with ${version}
+  directory?: string; // where the built site lives
+  workflows?: boolean; // write the CI jobs for the forge of source (default: yes)
   dir: string;
 }
 
@@ -127,9 +153,20 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
   };
   try {
     const origin = options.origin ?? (await ask("origin", "What is the public URL of your site? Give the origin, in the form https://example.org", undefined, httpsOrigin));
-    const version = options.version ?? (await ask("app-version", "Which version of your site are you publishing?", "1.0.0"));
+    // git answers first: the remote is the source, the tag at HEAD is the version.
+    const source = options.source ?? (await ask("source", "Which git repository is the site built from? Auditors rebuild from it; leave empty for closed source", (await gitRemote(options.dir)) ?? ""));
+    const artifact = options.artifact ?? (await ask("artifact", "Where will each release archive live? A URL template with ${version}; leave empty for none", ""));
+    const version = options.version ?? (await ask("app-version", "Which version of your site are you publishing? A git tag when source is set", (await gitTagAtHead(options.dir)) ?? "1.0.0"));
+    const directory = options.directory ?? (await ask("directory", "Which directory does your build write the site into?", "dist"));
     const type = (options.type ??
-      (await choose("type", "Which signing mechanism do you want to use?", [["sigsum", "you hold the signing keys"], ["sigstore", "sign from CI with an OIDC identity"]], "sigsum"))) as "sigsum" | "sigstore";
+      (await choose("type", "Which signing mechanism do you want to use?", [["sigsum", "you hold the signing keys; works from any CI"], ["sigstore", "sign from CI with an OIDC identity; GitHub and gitlab.com only"]], "sigsum"))) as "sigsum" | "sigstore";
+    const oidc = type === "sigstore" && (await sigstoreFromCi(source));
+    if (type === "sigstore" && source && !oidc) {
+      const issuer = ciIssuer(source);
+      log(
+        `Warning: the Sigstore CA does not certify ${issuer ? `identities from ${issuer}` : `any identity from ${new URL(source).host}: Forgejo and Gitea Actions issue none`}, so no CI job can sign there${issuer ? " (the Sigstore project adds self-hosted GitLab instances on request)" : ""}. Choose sigsum, or sign with --interactive`,
+      );
+    }
     let csp = options.csp;
     if (!csp) {
       const presets = Object.entries(CSP_PRESETS).map(([key, p]) => [key, p.title] as [string, string]);
@@ -153,12 +190,15 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
           .filter(Boolean);
       }
       rest.threshold ??= await ask("threshold", "How many of those signatures must a manifest carry?", "1", atMost("threshold", rest.signer?.length || Number(rest.keys)));
-      rest.casUrl ??= await ask("cas-url", "Where will Sigsum proofs be published? The URL of your content-addressed store", `${origin.replace(/\/+$/, "")}/cas/`, (v) => validateCasUrl(v, "--cas-url"));
     } else {
-      rest.identity ??= await ask("identity", "Which identity signs your releases? An email, or a GitHub workflow URL such as https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main");
-      rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
+      // The release workflow on any tag: a ^ prefix claim, so a release does not need a new enrollment.
+      const workflowIdentity = forgeOf(source) === "github" ? `^${source.replace(/\.git$/, "")}/.github/workflows/webcat-release.yml@refs/tags/` : undefined;
+      rest.identity ??= tagPrefixIdentity(
+        await ask("identity", "Which identity signs your releases? An email, or a workflow URL; a ^ prefix matches every ref it starts with (release tags)", workflowIdentity),
+      );
+      rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", ciIssuer(source) ?? "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
     }
-    return { ...rest, origin, version, type, csp, maxAge };
+    return { ...rest, origin, version, type, csp, maxAge, source, artifact, directory };
   } finally {
     rl?.close();
   }
@@ -206,50 +246,79 @@ export async function runInit(options: InitOptions): Promise<void> {
           signers,
           threshold: a.threshold ?? 1,
           maxAge: a.maxAge,
-          casUrl: a.casUrl ?? "",
         })
       : await buildEnrollmentObject({
           type: "sigstore",
           trustedRoot: await fetchCommunityTrustedRoot().then((root) => (a.keepRekorV1 ? root : withoutRekorV1(root))),
-          claims: { [SAN_OID]: a.identity ?? "", [ISSUER_V2_OID]: a.issuer ?? "" },
+          claims: sigstoreClaims(a.identity ?? "", a.issuer ?? ""),
           maxAge: a.maxAge,
         });
 
-  const config = { app: a.origin, version: a.version, default_csp: a.csp, default_index: "index.html", fallbacks: ["/index.html"], wasm: [], extra_csp: {} };
+  // With a source repository the release tag is the version, so the config does not pin one unless asked to.
+  const config = {
+    ...(a.source ? { source: a.source } : {}),
+    ...(a.artifact ? { artifact: a.artifact } : {}),
+    ...(!a.source || options.version !== undefined ? { version: a.version } : {}),
+    directory: a.directory,
+    origin: a.origin,
+    default_csp: a.csp,
+    default_index: "index.html",
+    fallbacks: ["/index.html"],
+    wasm: [],
+    extra_csp: {},
+  };
+  if (!a.source && !a.artifact) log("Warning: without source or artifact, auditors cannot reproduce or fetch this site's releases");
   const files: Array<[string, string]> = [
     ["webcat.config.json", JSON.stringify(config, null, 2) + "\n"],
     ...(a.type === "sigsum" ? [["trust_policy", policyText] as [string, string]] : []),
-    [".well-known/webcat/enrollment.json", JSON.stringify(enrollment, null, 2) + "\n"],
   ];
-  await mkdir(`${a.dir}/.well-known/webcat`, { recursive: true });
   for (const [name, contents] of files) {
     await writeFile(`${a.dir}/${name}`, contents);
     log(`wrote ${name}`);
   }
+  for (const file of await publishEnrollment(`${a.dir}/${WELL_KNOWN_DIR}`, enrollment)) {
+    log(`wrote ${path.relative(a.dir, file)}`);
+  }
   const host = new URL(a.origin).host;
+  // The CI jobs, for the site's own repository: the signing identity is then the site's workflow, nothing of ours.
+  const forge = forgeOf(a.source);
+  const workflows: string[] = [];
+  if (forge && a.workflows !== false) {
+    for (const [file, text] of ciJobs({ forge, type: a.type, host, directory: a.directory ?? "dist", token: Boolean(tokenHex), artifact: Boolean(a.artifact), oidc: a.type === "sigstore" && (await sigstoreFromCi(a.source)) })) {
+      if (text === null) log(`no ${file}: this CI cannot sign with Sigstore (see above)`);
+      else if (await access(`${a.dir}/${file}`).then(() => true, () => false)) log(`kept ${file} (exists)`);
+      else {
+        await mkdir(path.dirname(`${a.dir}/${file}`), { recursive: true });
+        await writeFile(`${a.dir}/${file}`, text);
+        workflows.push(file);
+        log(`wrote ${file}`);
+      }
+    }
+  }
+  const secrets = a.type === "sigsum" ? (tokenHex ? ", and add the keys as the secrets SIGSUM_KEY and SIGSUM_TOKEN_KEY" : ", and add the key as the secret SIGSUM_KEY") : "";
+  const ciStep = workflows.length ? `\n     ${workflows.join(" and ")} do this on every tag push and check the live site on a schedule: commit them${secrets}` : "";
   const key = keyPaths[0] ?? (a.signer ?? []).find((s) => s.endsWith(".pub")) ?? "<private key, or .pub for ssh-agent>";
   const token = tokenHex ? ` --token-signing-key keys/token --token-domain ${host}` : "";
-  const sign =
+  const release =
     a.type === "sigsum"
-      ? `webcat manifest sign -k ${key}${token} -o manifest.signed.json      # repeat with each key up to the threshold`
-      : "webcat manifest sign --type sigstore -o manifest.signed.json  # in CI with the identity above, or --interactive";
+      ? `webcat release -k ${key}${token}      # repeat -k for each key up to the threshold`
+      : "webcat release --type sigstore         # in CI with the identity above, or --interactive";
   const dns = tokenHex
     ? `
   0. Publish this DNS record so the production logs accept your submissions:
        _sigsum_v1.${host}. IN TXT "${tokenHex}"`
     : "";
-  const cas = a.type === "sigsum" ? `\n  7. Serve the cas/ directory that manifest sign writes at ${a.casUrl} (files named by their sha256)` : "";
   stdout.write(`
 Next steps${dns}
-  1. Serve the .well-known/webcat/ directory at ${a.origin}/.well-known/webcat/
+  1. Serve ${WELL_KNOWN_DIR}/ at ${a.origin}/${WELL_KNOWN_DIR}/
   2. Send this header on every response, byte for byte:
        Content-Security-Policy: ${a.csp}
-  3. Build the site, then generate, sign and bundle the manifest:
-       webcat manifest generate${a.type === "sigsum" ? "" : " --type sigstore"} -d <build dir> -o manifest.json      # <build dir>: the directory you serve, . if it is this one
-       ${sign}
-       webcat bundle create -o .well-known/webcat/bundle.json
-  4. Deploy, then check what visitors will see:   webcat site check ${host}
+  3. Build the site into ${a.directory}/, tag the release, then publish it in one step:
+       ${release}
+     (generates, signs, writes bundle.json and manifest.<type>.<hash>.json${a.artifact ? ", the release archive" : ""}; the history is kept in the archive of each release)${ciStep}
+  4. Deploy with ${WELL_KNOWN_DIR}/ copied into the web root, then check what visitors and auditors will see:
+       webcat site check ${host}
   5. Ask the oracles to record the enrollment:    webcat enrollment submit ${host}
-  6. Follow promotion on the chain:               webcat enrollment status ${host}${cas}
+  6. Follow promotion on the chain:               webcat enrollment status ${host}
 `);
 }

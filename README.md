@@ -75,39 +75,22 @@ the same one used by GitHub and public container registries.
 > [!WARNING]
 > Sigstore support is still a work in progress. Claim-based enrollment constraints are supported.
 
-Enroll once, naming the workflow that will sign (the identity is the workflow file at the
-branch that runs it):
+Enroll once, naming the workflow that will sign. The identity is the workflow file and the
+ref that runs it; a leading `^` makes the claim a prefix, so `@refs/tags/` covers every release
+tag and no new enrollment is needed per release. `init` and `enrollment create` add the `^`
+when an identity ends in `@refs/tags/` or `@refs/heads/`. For a GitHub Actions workflow `init`
+pins what the enrolled sites converged on: the workflow on its ref prefix (build signer URI),
+the repository (source repository URI), the ref prefix (source repository ref), the hosted
+runner, and the issuer. Any other identity is pinned by SAN and issuer:
 
 ```sh
 webcat init --type sigstore \
   --origin https://example.org \
-  --identity https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --identity '^https://github.com/acme/repo/.github/workflows/webcat-release.yml@refs/tags/' \
   --issuer https://token.actions.githubusercontent.com
 ```
 
-Then have that workflow call the CLI directly. The `id-token` permission is what lets the job
-obtain a Sigstore certificate for its identity:
-
-```yaml
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci && npm run build                      # produces dist/
-      - run: npm install -g @freedomofpress/webcat-cli
-      - run: webcat manifest generate --type sigstore -d dist -o manifest.json
-      - run: webcat manifest sign --type sigstore -o manifest.signed.json
-      - run: webcat bundle create -o dist/.well-known/webcat/bundle.json
-      - run: cp .well-known/webcat/enrollment.json dist/.well-known/webcat/
-      # deploy dist/ as usual; keep the previous bundle.json as bundle-prev.json across enrollment changes
-```
+Then have that workflow run `webcat release` on every tag; see [Releasing from CI](#releasing-from-ci).
 
 `manifest sign` checks the enrollment before requesting a certificate and fails the job with
 exit 2 if the enrollment's pinned trusted root can no longer verify new signatures. When that
@@ -182,16 +165,6 @@ everywhere a key is expected: `init --keys 0 --signer ~/.ssh/webcat.pub`,
 `manifest sign -k ~/.ssh/webcat.pub`, `--token-signing-key token.pub`. The key must be a plain
 ed25519 key (FIDO2 `sk-ed25519` keys produce a different signature format and do not work).
 
-### Content-addressable storage (`cas_url`)
-
-A Sigsum enrollment names a `cas_url`. Each `manifest sign` writes two objects under `./cas/`,
-named by their SHA-256: the submitted message (the manifest's SHA-256) and the canonical manifest.
-A log entry's checksum is the SHA-256 of the message, so an auditor fetches `cas_url/<checksum>`
-to get the message and `cas_url/<sha256 of message>` to get the manifest; the site must serve the
-`cas/` directory at `cas_url` as static files (any https URL you control works, for example
-`https://example.org/cas/`). With `WEBCAT_CAS_S3_ENDPOINT`, `WEBCAT_CAS_S3_BUCKET` and
-`WEBCAT_CAS_S3_TOKEN` set, `manifest sign` also uploads them to an S3-compatible bucket.
-
 `init` asks the few things a site needs (origin, Sigsum or Sigstore, a CSP preset, signer keys
 or a signing identity), writes `webcat.config.json`, a Sigsum `trust_policy`, and
 `.well-known/webcat/enrollment.json`, and prints the next steps. Every answer is also a flag,
@@ -199,7 +172,7 @@ so it runs unattended in CI:
 
 ```sh
 webcat init
-webcat init --origin https://example.org --signer <hex pubkey> --cas-url https://example.org/cas/
+webcat init --origin https://example.org --signer <hex pubkey>
 webcat init --origin https://example.org --type sigstore --identity you@example.org --issuer https://accounts.google.com
 ```
 
@@ -244,10 +217,41 @@ webcat enrollment create \
   --community-trusted-root \
   --identity alice@example.com \
   --issuer https://token.actions.githubusercontent.com \
-  --build-signer-uri https://github.com/acme/repo/.github/workflows/release.yml@refs/heads/main \
+  --build-signer-uri '^https://github.com/acme/repo/.github/workflows/webcat-release.yml@refs/tags/' \
   --claim 1.3.6.1.4.1.57264.1.11=platform-hosted \
   --max-age 3600
 ```
+
+### Migrating an existing site
+
+Enrollments and manifests gained a schema field (spec server.md and manifest.md). Extension 3.3.0
+accepts both generations; a later release will set a minimum and reject the old one. There is
+nothing to run on purpose: the commands a release already goes through migrate as they go.
+
+1. In `webcat.config.json`: drop `app`; add `source`, `artifact`, `directory` and `origin`
+   (the site's https origin); make `version` a semantic version, or remove it and tag releases.
+   `clean_urls: true` if the host serves `/page.html` at `/page` too.
+2. Move the enrollment to `.well-known/webcat/enrollment.json` if it lives elsewhere; it and
+   the `.well-known/webcat/` directory belong in the repository.
+3. Fix the policy if `csp hint` rejects it; extension 3.3.0 requires a `sandbox` directive on a
+   policy that can frame another origin.
+4. Tag and run `webcat release`, by hand or from the CI job `init` writes. The first
+   release inherits the history from the previous tag's archive when `artifact` points at one,
+   even one made by the old CLI, else from what `origin` serves today, so the manifest served
+   now stays in the history and the old bundle becomes `bundle-prev.json`. Inherited bundles
+   must verify under their own enrollment (expired is fine, unsigned is not), and the site must
+   serve the previous tag's version, or the release stops: `history inherit <origin>` takes
+   what the site serves regardless.
+5. Deploy, then `webcat enrollment submit <domain>`: the enrollment hash changed, and the chain
+   must record it. `site check` and `audit` confirm what visitors and auditors see.
+
+- `manifest generate` writes schema 1 from the same `webcat.config.json`; `manifest sign`
+  migrates an unsigned schema 0 manifest before signing. Either verifies under the existing
+  enrollment, old or new.
+- `bundle create` (and so `release`) writes the enrollment as schema 1 (no `cas_url`). Nothing
+  signatures depend on changes, so the signed manifest keeps verifying and no re-signing is
+  needed. The hash does change: the previous bundle is kept as `bundle-prev.json`, so serve both
+  and run `enrollment submit <domain>` for the chain to record the new hash.
 
 ### Submitting and checking an enrollment
 
@@ -270,6 +274,12 @@ check and the proof of work without submitting. `--chain-api` and `--oracle` poi
 infrastructure.
 
 ## Manifest helpers
+
+`manifest generate` writes a schema 1 manifest (`manifest_schema: 1`, spec manifest.md): directory
+keys in `files`, `fallback_hashes`, optional `source` and `artifact`, and none of `app`,
+`default_index` or `default_fallback`. It is hashed under RFC 8785 (JCS), as extension 3.3.0 does,
+and verifies under any enrollment, schema 1 or older. Extensions from 3.2.0 accept it; older ones
+do not. Manifests without `manifest_schema` keep verifying under the OLPC hash they were signed with.
 
 The `manifest` namespace operates on WEBCAT manifests:
 
@@ -389,6 +399,41 @@ webcat site check example.org --path / --path /app/main.js
 
 Exits 1 when the bundle does not verify, the enrollment does not match, or any path has a problem.
 
+## Auditing a domain
+
+`audit <domain>` runs the checks of the spec's auditors ([auditing.md](https://github.com/freedomofpress/webcat-spec))
+from the outside, with nothing but what the domain serves:
+
+- `bundle.json` and `bundle-prev.json` verified like the extension does;
+- `enrollment.<hash>.json` for every hash the bundles name, hashing to its name;
+- for Sigsum, the logs the enrollment names read directly (`get-tree-head`, `get-leaves`): every
+  leaf by one of the signers must lead to a served `manifest.sigsum.<checksum>.json`, which is a
+  release. Nothing sits between the CLI and the logs; the whole log is read each run (the test
+  log, 280k leaves, takes about 20 s);
+- `manifest.<type>.<hash>.json` for every served manifest, equal to what the bundle serves;
+- every release reachable from there: the tag on `source`, the `artifact` archive downloaded and
+  every path in `files` hashed against the manifest, the well-known directory inside the archive
+  consistent, and every hash-named file it carried still served unchanged. The archives are
+  walked backwards, since each one carries the directory of its time, until the first release.
+
+```sh
+webcat audit example.org                       # exit 1 when anything above fails
+webcat audit example.org --repro               # plus how to rebuild each release from its source
+webcat audit example.org --version 1.4.0 --built dist   # compare a local build with that release's manifest
+```
+
+`--built` is the reproducibility check of manifest.md section 2.2: build the release from
+`source` at its tag, then compare the output with the manifest. The build recipe itself is not
+yet specified.
+
+For Sigstore, every Rekor the enrollment's trusted root names is read the same way, v1 one
+entry at a time (its only listing API) and v2 by entry tiles, and every entry whose certificate
+satisfies the claims must lead to a served `manifest.sigstore.<hash>.json`. That is for private
+deployments: a log above `--max-log-entries` (200,000 unless overridden) is skipped and
+reported as "scanning this log requires an index (TODO)", which the public Sigstore logs always
+are at hundreds of millions of entries. The index is specified later. The chain's own history of enrollment hashes is also
+work in progress and reported as such; it needs a replay, not a query API.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -402,13 +447,230 @@ Errors are printed to stderr as `Error: <message>`. Messages name the CLI flag (
 
 ## Bundle helpers
 
-Use `bundle create` to combine an enrollment and a manifest (with signatures) into a WEBCAT bundle that can be distributed to verifiers:
+`bundle create` publishes a signed manifest into the well-known directory: `bundle.json`, the
+hash-named manifest file, each fallback under `hashes/`, and the previous bundle as
+`bundle-prev.json` when the enrollment changed. With `-o` it only writes the bundle:
 
 ```sh
-webcat bundle create -e examples/enrollment.json -m examples/manifest.json > bundle.json
+webcat bundle create -e examples/enrollment.json -m examples/manifest.json -o bundle.json
 ```
 
-The resulting `bundle.json` matches the fixture located in `examples/bundle.json`.
+### History and releases
+
+`.well-known/webcat/` is the site's append-only history and the directory auditors read
+([spec, server.md section 1](https://github.com/freedomofpress/webcat-spec)). The CLI writes
+into it and never rewrites a hash-named file:
+
+| File | Written by |
+|------|-----------|
+| `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o` |
+| `bundle.json`, `manifest.sigsum.<checksum>.json` or `manifest.sigstore.<hash>.json` | `bundle create` |
+| `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle; `release` removes it once it has expired, when no client can accept it any more |
+| `hashes/<hash>` | `bundle create`, one per `fallback_hashes` entry, copied from the built site (`--directory`, or `directory` in the config) |
+
+The history travels with the releases, not with git. The archive `release` writes, the one the
+`artifact` URL serves for the version, is the web root with `.well-known/webcat/` inside. The
+next `release` downloads the archive of the previous tag, checks every file in it against the
+manifest it ships and every hash-named file against its name, and only then copies the
+directory in and adds the new release on top. Each release thereby proves the previous one was
+what it claimed before building on it, and a single archive carries the whole history. A
+missing or mismatching archive stops the release; `--no-history` overrides, and loses
+everything before this release for every later one. `history inherit <archive-url>` does the
+same step on its own.
+
+Sites that prefer to keep the directory in the repository can: `release --commit` and
+`bundle create --commit` commit the written files, and `history check [ref]` verifies that every
+hash-named file hashes to its name, that the current pointers match them, that every fallback
+the manifest lists is under `hashes/`, and that nothing was modified or deleted since `ref`.
+
+When `webcat.config.json` sets `source`, the manifest claims the files build from that
+repository at tag `version`. Before anything is signed, `manifest generate` and `manifest sign`
+both require HEAD to be that tag, the tag to exist on the `source` remote, and, under GitHub,
+Forgejo or Gitea Actions, the job to have been started by that tag rather than a branch push;
+`manifest sign` also requires a clean working tree. `--skip-git-checks` overrides all of it.
+Without `version` in the config, the tag at HEAD is the version.
+
+## Releasing from CI
+
+A release is a tag. Work lands on branches as usual; when a commit is tagged, CI checks it out,
+builds the site, runs `webcat release`, uploads the archive where the `artifact` URL resolves
+and deploys the build directory with `.well-known/webcat/` inside. Nothing is pushed back to
+the repository, so the job needs no write access to it. Two things the checkout must provide:
+the tag at HEAD, which is the version, and the previous tag, from which the history is inherited,
+so the clone must not be shallow.
+
+`artifact` in `webcat.config.json` names where each release's archive lives, for example
+`https://github.com/acme/site/releases/download/${version}/site-${version}.tar.gz`;
+`release` writes `site-<version>.tar.gz` in the working directory for the job to upload.
+
+`init` writes the jobs below into your repository for the CI system `source` points at
+(`.github/workflows/` on GitHub, `.gitlab-ci.yml` on GitLab, `.forgejo/workflows/` on Codeberg
+and other Forgejo or Gitea hosts), with your host, build directory and keys filled in, and never
+overwrites an existing file. The jobs are templates under `templates/` in this package, one per
+CI system and signing type. They are plain files you own: no reusable workflow from this repository is involved, so
+the identity in your certificates is your own workflow and nothing here can break your release.
+Pass `--no-workflows` to skip them. The same text, to copy by hand:
+
+#### GitHub Actions, Sigstore
+
+The job signs with its own identity; the `id-token` permission is what lets it obtain a
+certificate. The enrollment names that workflow on any tag with a prefix claim, see
+[above](#choosing-sigstore).
+
+```yaml
+# .github/workflows/webcat-release.yml
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+name: WEBCAT release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write     # upload the archive to the release
+  id-token: write     # the Sigstore identity the enrollment names
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build                          # must produce dist/
+      - run: npm install -g @freedomofpress/webcat-cli@0.2.0
+      - run: webcat release --type sigstore
+      - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: cp -r .well-known dist/
+      # deploy dist/ as usual; webcat-verify.yml then checks what visitors and auditors see
+```
+
+#### Forgejo Actions, Sigsum
+
+Sigsum signs with a key, so the job holds one as a secret, and production logs want the
+rate-limit token key too (`init` generates both under `keys/`). Every signature the key makes
+is public in the Sigsum logs; that, not the secrecy of the CI runner, is what keeps a stolen
+key from going unnoticed. Forgejo Actions issue no OIDC identity, so Sigstore sites sign
+elsewhere.
+
+```yaml
+# .forgejo/workflows/webcat-release.yml
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# Secrets: SIGSUM_KEY, the private signing key; SIGSUM_TOKEN_KEY, the rate-limit token key.
+name: WEBCAT release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write     # upload the archive to the release
+jobs:
+  release:
+    runs-on: docker
+    container:
+      image: node:22
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: https://code.forgejo.org/actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: https://code.forgejo.org/actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - run: npm ci && npm run build                          # must produce dist/
+      - run: npm install -g @freedomofpress/webcat-cli@0.2.0
+      - run: |
+          install -m 600 /dev/stdin keys/key1 <<< "$SIGSUM_KEY"
+          install -m 600 /dev/stdin keys/token <<< "$SIGSUM_TOKEN_KEY"
+        env:
+          SIGSUM_KEY: ${{ secrets.SIGSUM_KEY }}
+          SIGSUM_TOKEN_KEY: ${{ secrets.SIGSUM_TOKEN_KEY }}
+      - run: webcat release -k keys/key1 --token-signing-key keys/token --token-domain example.org
+      - run: mkdir release && mv site-*.tar.gz release/
+      - uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          release-dir: release
+      - run: cp -r .well-known dist/
+      # deploy dist/ as usual; webcat-verify.yml then checks what visitors and auditors see
+```
+
+#### GitLab CI, Sigstore or Sigsum
+
+One `.gitlab-ci.yml` carries both jobs. gitlab.com runners issue an OIDC token the public
+Sigstore CA certifies, so Sigstore signs there too; archives go to the project's generic package
+registry, which is what `artifact` points at. Whether a self-hosted GitLab can sign is asked
+from the Sigstore CA's own configuration: the Sigstore project lists such instances on request
+(`gitlab.archlinux.org` is one). Forgejo and Gitea Actions issue no identity at all. Where
+Sigstore cannot sign, `init` says so and the Sigsum job is the one that works.
+
+```yaml
+# .gitlab-ci.yml
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# Archives go to the generic package registry: artifact in webcat.config.json is
+# $CI_API_V4_URL/projects/<id>/packages/generic/site/${version}/site-${version}.tar.gz
+image: node:22
+
+release:
+  rules:
+    - if: $CI_COMMIT_TAG
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - npm ci && npm run build                          # must produce public/
+    - npm install -g @freedomofpress/webcat-cli@0.2.0
+    - webcat release --type sigstore --oidc-token "$SIGSTORE_ID_TOKEN"
+    - 'curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file site-$CI_COMMIT_TAG.tar.gz "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/site/$CI_COMMIT_TAG/site-$CI_COMMIT_TAG.tar.gz"'
+    - cp -r .well-known public/
+    # deploy public/ as usual; the verify job then checks what visitors and auditors see
+
+verify:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - npm install -g @freedomofpress/webcat-cli@0.2.0
+    - webcat site check example.org
+    - webcat audit example.org
+```
+
+#### Verifying the live site on a schedule
+
+Deploys drift: a cache serves a stale file, a host setting changes a header. The second job
+checks what visitors and auditors see every six hours and fails when anything is off.
+
+```yaml
+# .github/workflows/webcat-verify.yml
+# Written by webcat init. Checks the live site the way the extension and the auditors do; a failure is a broken site.
+name: WEBCAT verify
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @freedomofpress/webcat-cli@0.2.0
+      - run: webcat site check example.org
+      - run: webcat audit example.org
+```
 
 ## End-to-end example (based on `demo.sh`)
 
@@ -434,7 +696,7 @@ EOF
 
 cat > webcat.config.json <<'EOF'
 {
-  "app": "https://github.com/element-hq/element-web",
+  "source": "https://github.com/element-hq/element-web",
   "version": "1.12.3",
   "default_csp": "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; img-src * blob: data:; connect-src * blob:; font-src 'self' data: ; media-src * blob: data:; child-src blob: data:; worker-src 'self'; frame-src blob: data:; form-action 'self'; manifest-src 'self'; frame-ancestors 'self'",
   "fallbacks": ["/error.html"],
@@ -452,7 +714,6 @@ webcat enrollment create \
   --policy-file trust_policy \
   --threshold 1 \
   --max-age 15552000 \
-  --cas-url https://cas.demoelement.com \
   --signer "$HEX1" \
   --signer "$HEX2" \
   --output enrollment.json
@@ -487,11 +748,16 @@ or a JSON equivalent) matching the schema below:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `app` | string | Origin URL of the application being packaged. |
-| `version` | string | Git tag to be used for reproducibility and auditing. |
+| `source` | string | Optional. Git repository URL the site is built from; `version` must be a tag there. Auditors rebuild from it. |
+| `artifact` | string | Optional. Release archive URL template containing `${version}`; auditors fetch it. |
+| `version` | string | Semantic version of this release, such as `1.4.0`; a leading `v` is tolerated. Optional: without it the git tag at HEAD is the version. |
+| `directory` | string | Optional. Where the build writes the site; `release` and `bundle create` read it. |
+| `origin` | string | Optional. The site's https origin; `release` inherits the history from what it serves when no archive has it. |
+| `clean_urls` | boolean | Optional. The host serves `/page.html` at `/page` too (Vercel, Netlify, Cloudflare Pages): both are listed. |
+| `app` | string | Deprecated and ignored: manifests no longer carry it. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
 | `default_index` | string | Optional, `index.html`. The file a directory path stands for: `/docs/` gets the hash of `/docs/index.html`. |
-| `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `manifest generate`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |
+| `fallbacks` | string[] | Optional, `["/<default_index>"]`. Pages the extension also accepts at any path on a navigation: a SPA shell, a 404 page. Each is published at `/.well-known/webcat/hashes/<hash>` by `bundle create`, and `site check` warns when one is not served there. `default_fallback` (one path) is the pre-3.2.0 spelling and still accepted. |
 | `wasm` | string[] | Optional list of base64url SHA-256 digests for inline WebAssembly modules. `.wasm` files are added automatically during generation. |
 | `extra_csp` | Record<string, string> | Optional per-path CSP overrides; keys must start with `/`. | `{}` or `{ "/app": "default-src 'none'" }` |
 

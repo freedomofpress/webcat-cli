@@ -9,7 +9,7 @@ export interface BundleDocument {
   manifest: ManifestDocument;
 }
 
-export function parseBundleObject(parsed: unknown, subject = "bundle"): BundleDocument {
+export function parseBundleObject(parsed: unknown, subject = "bundle", { policy = true } = {}): BundleDocument {
   const bundle = ensureObject(parsed, subject);
   validateAll(
     ["enrollment", "manifest", "signatures"].map((key) => () => {
@@ -20,7 +20,7 @@ export function parseBundleObject(parsed: unknown, subject = "bundle"): BundleDo
   );
   return {
     enrollment: parseEnrollmentObject(bundle.enrollment),
-    manifest: parseManifestDocumentObject({ manifest: bundle.manifest, signatures: bundle.signatures }),
+    manifest: parseManifestDocumentObject({ manifest: bundle.manifest, signatures: bundle.signatures }, { policy }),
   };
 }
 

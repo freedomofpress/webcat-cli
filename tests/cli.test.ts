@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { buildEnrollmentObject, loadEnrollment, parseEnrollmentObject, parseSignerKey } from "../src/enrollment";
@@ -20,9 +20,14 @@ import {
   hexToBase64Url,
   parseInteger,
   toBase64Url,
-  validateCasUrl,
   validateMaxAge,
 } from "../src/utils";
+
+// The history fixtures reuse the example signatures over other files; the inherit test steers the verifier.
+vi.mock("../src/bundle", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/bundle")>();
+  return { ...real, verifyBundle: vi.fn(real.verifyBundle) };
+});
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -71,13 +76,6 @@ describe("integer and range validation", () => {
     );
     expect(() => validateMaxAge(60 * 60 * 24 * 30, "max_age")).not.toThrow();
   });
-
-  it("validates CAS URLs", () => {
-    expect(() => validateCasUrl("notaurl", "cas_url")).toThrow("cas_url must be a valid URL");
-    expect(() => validateCasUrl("http://example.com", "cas_url")).toThrow("cas_url must use https://");
-    expect(() => validateCasUrl("https://", "cas_url")).toThrow("cas_url must be a valid URL");
-    expect(() => validateCasUrl("https://example.com", "cas_url")).not.toThrow();
-  });
 });
 
 const real = await sigsumEnrollmentFromPolicy(SIGSUM_TEST_POLICY); // a genuine compiled policy plus its logs map
@@ -93,7 +91,6 @@ describe("enrollment helpers", () => {
       signers: [baseSigner],
       threshold: 1,
       maxAge: 1_000_000,
-      casUrl: "https://example.com",
       logs: real.logs,
     });
 
@@ -102,6 +99,7 @@ describe("enrollment helpers", () => {
       throw new Error("expected sigsum enrollment");
     }
     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
+    expect([enrollment.enrollment_schema, "cas_url" in enrollment]).toEqual([1, false]);
     expect(enrollment.threshold).toBe(1);
     expect(enrollment.max_age).toBe(1_000_000);
   });
@@ -114,8 +112,7 @@ describe("enrollment helpers", () => {
         signers: [],
         threshold: 1,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_SIGNERS_EMPTY");
 
@@ -126,8 +123,7 @@ describe("enrollment helpers", () => {
         signers: [baseSigner, baseSigner],
         threshold: 1,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment.signers must not contain duplicates");
 
@@ -138,8 +134,7 @@ describe("enrollment helpers", () => {
         signers: [baseSigner, secondSigner],
         threshold: 3,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_IMPOSSIBLE");
 
@@ -150,22 +145,10 @@ describe("enrollment helpers", () => {
         signers: [baseSigner],
         threshold: 0,
         maxAge: 1_000_000,
-        casUrl: "https://example.com",
-        logs: real.logs,
+          logs: real.logs,
       }),
     ).rejects.toThrow("enrollment: ERR_WEBCAT_ENROLLMENT_THRESHOLD_MALFORMED");
 
-    await expect(
-      buildEnrollmentObject({
-        type: "sigsum",
-        policy: real.policy,
-        signers: [baseSigner],
-        threshold: 1,
-        maxAge: 60 * 60 * 24 * 8,
-        casUrl: "http://example.com",
-        logs: real.logs,
-      }),
-    ).rejects.toThrow("enrollment.cas_url must use https://");
   });
 
   it("builds sigstore enrollment objects", async () => {
@@ -182,6 +165,7 @@ describe("enrollment helpers", () => {
 
     expect(enrollment).toEqual({
       type: "sigstore",
+      enrollment_schema: 1,
       trusted_root: trustedRoot,
       claims: {
         "2.5.29.17": "identity@example.com",
@@ -275,28 +259,6 @@ describe("enrollment helpers", () => {
   });
 });
 
-describe("CAS resolution", () => {
-  it("lets an auditor walk from a log entry's checksum to the manifest", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
-    const cwd = process.cwd();
-    process.chdir(dir);
-    try {
-      const canonicalManifest = JSON.stringify({ app: "demo" });
-      const { publishManifestToCas } = await import("../src/cas");
-      await publishManifestToCas(canonicalManifest);
-      // The Sigsum leaf checksum is sha256(message) where message = sha256(manifest); both are CAS object names.
-      const message = createHash("sha256").update(canonicalManifest).digest();
-      const leafChecksumHex = createHash("sha256").update(message).digest("hex");
-      const storedMessage = await readFile(path.join(dir, "cas", leafChecksumHex));
-      expect(storedMessage.equals(message)).toBe(true);
-      expect(await readFile(path.join(dir, "cas", storedMessage.toString("hex")), "utf8")).toBe(canonicalManifest);
-    } finally {
-      process.chdir(cwd);
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("manifest configuration", () => {
   it("loads and normalizes configuration", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-config-"));
@@ -329,16 +291,18 @@ describe("manifest configuration", () => {
   it("builds manifests with the extension's rules", () => {
     const hash = toBase64Url(createHash("sha256").update("x").digest());
     const scan = { files: new Map([["/index.html", hash], ["/docs/index.html", "D".repeat(42) + "A"], ["/404.html", "E".repeat(42) + "A"]]), wasm: new Set<string>() };
-    const config = { app: "https://example.com", version: "1", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], wasm: [], extra_csp: {} };
+    const config = { version: "1.0.0", default_csp: "default-src 'none'", default_index: "index.html", fallbacks: ["/404.html"], wasm: [], extra_csp: {} };
     const built = buildManifest(config, scan);
-    // Directory keys next to each index, the fallback as a hash, and the legacy fields for extensions before 3.2.0.
+    // Schema 1: directory keys next to each index, the fallback as a hash, none of the legacy fields.
     expect(Object.keys(built.files)).toEqual(["/", "/404.html", "/docs/", "/docs/index.html", "/index.html"]);
     expect(built.files["/"]).toBe(hash);
     expect(built.fallback_hashes).toEqual([scan.files.get("/404.html")]);
-    expect([built.default_index, built.default_fallback]).toEqual(["index.html", "/404.html"]);
-    // No fallbacks at all: nothing emitted for either generation.
-    const none = buildManifest({ ...config, fallbacks: [] }, scan);
-    expect([none.fallback_hashes, none.default_fallback]).toEqual([undefined, undefined]);
+    expect([built.manifest_schema, built.app, built.default_index, built.default_fallback]).toEqual([1, undefined, undefined, undefined]);
+    expect(buildManifest({ ...config, fallbacks: [] }, scan).fallback_hashes).toBeUndefined();
+    expect(buildManifest({ ...config, source: "https://github.com/o/r", artifact: "https://x/${version}.tgz" }, scan)).toMatchObject({ source: "https://github.com/o/r", artifact: "https://x/${version}.tgz" });
+    expect(() => buildManifest({ ...config, version: "1" }, scan)).toThrow("config.version must be a semantic version such as 1.4.0, got '1'");
+    // clean_urls: the host serves /404.html at /404 too, so both are listed; index files only get their directory key.
+    expect(Object.keys(buildManifest({ ...config, clean_urls: true }, scan).files)).toEqual(["/", "/404", "/404.html", "/docs/", "/docs/index.html", "/index.html"]);
     expect(() => buildManifest({ ...config, fallbacks: ["/missing.html"] }, scan)).toThrow("config.fallbacks must name scanned files, '/missing.html' was not found");
     expect(() => buildManifest({ ...config, default_csp: "default-src 'self'" }, scan)).toThrow("config.default_csp must be a WEBCAT-compatible CSP");
     expect(() => buildManifest({ ...config, extra_csp: { "/a": "script-src https://cdn.example" } }, scan)).toThrow("config.extra_csp['/a'] must be a WEBCAT-compatible CSP");
@@ -347,10 +311,9 @@ describe("manifest configuration", () => {
     );
   });
 
-  it("reads old and new configs alike and publishes fallbacks under their hash", async () => {
-    const { writeFallbackCopies } = await import("../src/manifest");
+  it("reads old and new configs alike", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-fallback-"));
-    const base = { app: "https://example.com", version: "1", default_csp: "default-src 'none'" };
+    const base = { app: "https://example.com", version: "1.0.0", default_csp: "default-src 'none'" };
     await writeFile(path.join(dir, "legacy.json"), JSON.stringify({ ...base, default_index: "/index.html", default_fallback: "/404.html" }));
     await writeFile(path.join(dir, "bare.json"), JSON.stringify(base));
     await writeFile(path.join(dir, "new.json"), JSON.stringify({ ...base, fallbacks: ["/404.html", "/index.html"] }));
@@ -361,10 +324,8 @@ describe("manifest configuration", () => {
     await writeFile(path.join(dir, "404.html"), "lost");
     await writeFile(path.join(dir, "index.html"), "home");
     const config = await loadManifestConfig(path.join(dir, "legacy.json"));
-    const manifest = buildManifest(config, await scanDirectory(dir, { excludePaths: ["legacy.json", "bare.json", "new.json"] }));
-    const hash = toBase64Url(createHash("sha256").update("lost").digest());
-    expect(await writeFallbackCopies(dir, config, manifest)).toEqual([`/.well-known/webcat/hashes/${hash}`]);
-    expect(await readFile(path.join(dir, ".well-known/webcat/hashes", hash), "utf8")).toBe("lost");
+    const manifest = buildManifest({ ...config, version: "1.0.0" }, await scanDirectory(dir, { excludePaths: ["legacy.json", "bare.json", "new.json"] }));
+    expect(manifest.fallback_hashes).toEqual([toBase64Url(createHash("sha256").update("lost").digest())]);
     await rm(dir, { recursive: true, force: true });
   });
 });
@@ -533,6 +494,12 @@ describe("csp hints", () => {
     expect(() => validateCSP(suggested)).not.toThrow();
     expect(suggested).toContain("img-src *");
     expect(hintCsp("default-src 'none'; script-src 'self'; style-src 'self'").groups).toEqual([]);
+    // Framing another origin needs a sandbox directive; the nearest policy gets the usual flags and passes the validator.
+    const framed = hintCsp("default-src 'none'; script-src 'self'; style-src 'self'; frame-src https://captcha.example");
+    expect(framed.groups.map((g) => g.title)).toEqual(["Frames from other origins"]);
+    expect(framed.suggested).toContain("sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads");
+    expect(framed.accepted.join(" ")).not.toContain("please report");
+    expect(hintCsp(framed.suggested).compatible).toBe(true);
     expect(hintCsp("default-src 'none', default-src 'self'").groups[0].title).toBe("Multiple policies");
     // 'none' next to another source is not 'none' for the extension; the verdict comes from its validator.
     const mixed = hintCsp("default-src 'none' 'self'");
@@ -581,13 +548,75 @@ describe("init", () => {
   it("writes a config, a policy and a valid enrollment from flags alone", async () => {
     const { runInit, CSP_PRESETS } = await import("../src/init");
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-"));
-    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)], casUrl: "https://example.org/cas/" });
+    await runInit({ dir, origin: "https://example.org", signer: ["aa".repeat(32)] });
     const config = JSON.parse(await readFile(path.join(dir, "webcat.config.json"), "utf8"));
-    expect(config.app).toBe("https://example.org");
+    expect(config.app).toBeUndefined();
     expect(config.default_csp).toBe(CSP_PRESETS.static.csp);
     const enrollment = await loadEnrollment(path.join(dir, ".well-known/webcat/enrollment.json"));
     expect(enrollment.type).toBe("sigsum");
     expect(await readFile(path.join(dir, "trust_policy"), "utf8")).toContain("quorum");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("writes the site's own CI jobs for the forge of source, and never a second time", async () => {
+    const { runInit } = await import("../src/init");
+    const { ciJobs, render } = await import("../src/ci");
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-ci-"));
+    const flags = { dir, origin: "https://example.org", type: "sigstore" as const, identity: "a@b", issuer: "https://accounts.google.com", source: "https://github.com/o/r", artifact: "https://github.com/o/r/releases/download/${version}/site-${version}.tar.gz" };
+    await runInit(flags);
+    // A workflow identity pins the workflow prefix, the repository, the ref prefix and the hosted runner; an email pins the SAN.
+    const { sigstoreClaims } = await import("../src/init");
+    expect(sigstoreClaims("^https://github.com/o/r/.github/workflows/webcat-release.yml@refs/tags/", "https://token.actions.githubusercontent.com")).toEqual({
+      "1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com",
+      "1.3.6.1.4.1.57264.1.9": "^https://github.com/o/r/.github/workflows/webcat-release.yml@refs/tags/",
+      "1.3.6.1.4.1.57264.1.11": "github-hosted",
+      "1.3.6.1.4.1.57264.1.12": "https://github.com/o/r",
+      "1.3.6.1.4.1.57264.1.14": "^refs/tags/",
+    });
+    expect(sigstoreClaims("a@b", "https://accounts.google.com")).toEqual({ "2.5.29.17": "a@b", "1.3.6.1.4.1.57264.1.8": "https://accounts.google.com" });
+    const release = await readFile(path.join(dir, ".github/workflows/webcat-release.yml"), "utf8");
+    expect(release).toContain("webcat release --type sigstore");
+    expect(release).toContain("gh release create");
+    expect(release).toContain("id-token: write");
+    expect(await readFile(path.join(dir, ".github/workflows/webcat-verify.yml"), "utf8")).toContain("webcat audit example.org");
+    await writeFile(path.join(dir, ".github/workflows/webcat-release.yml"), "mine");
+    await runInit(flags);
+    expect(await readFile(path.join(dir, ".github/workflows/webcat-release.yml"), "utf8")).toBe("mine");
+    // The renderer: values, and blocks kept or dropped whole, whether they own a line or sit inline.
+    expect(render("a {{x}}\n{{#t}}\nkept\n{{/t}}\n{{#f}}\ndropped\n{{/f}}\nb{{#t}} in{{/t}}{{#f}} out{{/f}}\n", { x: "1", t: true, f: false })).toBe("a 1\nkept\nb in\n");
+    // Sigsum on a Forgejo: the key secrets and the forge's own actions; Sigstore there has no identity to sign with.
+    const forgejo = ciJobs({ forge: "forgejo", type: "sigsum", host: "example.org", directory: "dist", token: true, artifact: true, oidc: false });
+    expect(forgejo.map(([f]) => f)).toEqual([".forgejo/workflows/webcat-release.yml", ".forgejo/workflows/webcat-verify.yml"]);
+    expect(forgejo[0][1]).toContain("SIGSUM_TOKEN_KEY");
+    expect(forgejo[0][1]).toContain("--token-domain example.org");
+    expect(forgejo[0][1]).toContain("code.forgejo.org/actions/checkout");
+    expect(forgejo[0][1]).not.toMatch(/\{\{[#/]?\w+\}\}/); // ${{ secrets.X }} is GitHub syntax and stays
+    expect(ciJobs({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", token: false, artifact: false, oidc: false })[0][1]).toBeNull();
+    // Only GitHub and gitlab.com issue identities the public Sigstore CA certifies; a self-hosted GitLab gets no Sigstore job.
+    const { sigstoreFromCi, ciIssuer } = await import("../src/ci");
+    expect([ciIssuer("https://github.com/o/r"), ciIssuer("https://gitlab.example.org/o/r"), ciIssuer("https://codeberg.org/o/r"), ciIssuer(undefined)]).toEqual(["https://token.actions.githubusercontent.com", "https://gitlab.example.org", null, null]);
+    // Asked from Fulcio's configuration: a self-hosted GitLab it lists signs, one it does not list does not; offline, the two known ones.
+    const { createServer } = await import("node:http");
+    const fulcio = createServer((_req, res) => res.end(JSON.stringify({ issuers: [{ issuerUrl: "https://gitlab.example.org", issuerType: "ci-provider" }] })));
+    await new Promise<void>((resolve) => fulcio.listen(0, "127.0.0.1", resolve));
+    const fulcioUrl = `http://127.0.0.1:${(fulcio.address() as { port: number }).port}`;
+    try {
+      expect(await sigstoreFromCi("https://gitlab.example.org/o/r", fulcioUrl)).toBe(true);
+      expect(await sigstoreFromCi("https://github.com/o/r", fulcioUrl)).toBe(false);
+      expect(await sigstoreFromCi("https://codeberg.org/o/r", fulcioUrl)).toBe(false);
+    } finally {
+      fulcio.close();
+    }
+    expect(await sigstoreFromCi("https://github.com/o/r", "http://127.0.0.1:1")).toBe(true);
+    expect(await sigstoreFromCi("https://gitlab.example.org/o/r", "http://127.0.0.1:1")).toBe(false);
+    expect(ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false, oidc: false })[0][1]).toBeNull();
+    expect(ciJobs({ forge: "gitlab", type: "sigsum", host: "example.org", directory: "public", token: false, artifact: false, oidc: false })[0][1]).toContain("webcat release -k keys/key1");
+    // GitLab.com: one file, the id token for Sigstore, no archive upload without an artifact.
+    const gitlab = ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false, oidc: true });
+    expect(gitlab.map(([f]) => f)).toEqual([".gitlab-ci.yml"]);
+    expect(gitlab[0][1]).toContain("SIGSTORE_ID_TOKEN");
+    expect(gitlab[0][1]).not.toContain("--upload-file"); // no archive to publish
+    expect(gitlab[0][1]).toContain("cp -r .well-known public/");
     await rm(dir, { recursive: true, force: true });
   });
 });
@@ -655,6 +684,419 @@ describe("site checks", () => {
     const problems = checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src *", refresh: "0", "origin-agent-cluster": "?0" }));
     expect(problems).toHaveLength(4);
     expect(checkHeaders(manifest, "/", new Headers({ "content-security-policy": "default-src 'none'" }))).toEqual([]);
+  });
+});
+
+describe("schema 1 migrations", () => {
+  it("migrates a Sigsum enrollment from schema 0 to 1 without re-signing", async () => {
+    const { migrateEnrollment } = await import("../src/enrollment");
+    const { validateSigsumEnrollment } = await import("@freedomofpress/webcat/webcat/validators");
+    const { enrollmentHashHex } = await import("../src/chain");
+    const { verifyBundle } = await import("../src/bundle");
+    const bundle = await loadBundleDocument("examples/bundle.json");
+    const old = bundle.enrollment;
+    expect([old.enrollment_schema, typeof (old as any).cas_url]).toEqual([undefined, "string"]);
+    const migrated = migrateEnrollment(old);
+    expect(migrated).toEqual({ ...old, cas_url: undefined, enrollment_schema: 1 });
+    expect("cas_url" in migrated).toBe(false);
+    expect(validateSigsumEnrollment(old as any, 1)?.code).toBe("ERR_WEBCAT_ENROLLMENT_SCHEMA_DEPRECATED");
+    expect(validateSigsumEnrollment(migrated as any, 1)).toBeNull();
+    expect(enrollmentHashHex(migrated)).not.toBe(enrollmentHashHex(old));
+    expect(migrateEnrollment(migrated)).toBe(migrated);
+    // The manifest signed under the old enrollment verifies under the new one: signers, policy and threshold are the same.
+    const result = await verifyBundle({ enrollment: migrated, manifest: bundle.manifest });
+    expect(typeof result === "number" ? "ok" : result.code).toMatch(/^(ok|ERR_WEBCAT_MANIFEST_EXPIRED)$/);
+  });
+
+  it("migrates a Sigstore enrollment from schema 0 to 1 keeping claims and trusted root", async () => {
+    const { migrateEnrollment } = await import("../src/enrollment");
+    const { validateSigstoreEnrollment } = await import("@freedomofpress/webcat/webcat/validators");
+    const { enrollmentHashHex } = await import("../src/chain");
+    const old = parseEnrollmentObject({
+      type: "sigstore",
+      trusted_root: { tlogs: [{ baseUrl: "https://log2025-1.rekor.sigstore.dev", publicKey: { rawBytes: "K2" } }], timestampAuthorities: [{ uri: "https://tsa" }] },
+      claims: { "2.5.29.17": "https://github.com/o/r/.github/workflows/w.yml@refs/heads/main", "1.3.6.1.4.1.57264.1.8": "https://token.actions.githubusercontent.com" },
+      max_age: 5184000,
+    });
+    const migrated = migrateEnrollment(old);
+    expect(migrated).toEqual({ ...old, enrollment_schema: 1 });
+    expect(validateSigstoreEnrollment(old as any, 1)?.code).toBe("ERR_WEBCAT_ENROLLMENT_SCHEMA_DEPRECATED");
+    expect(validateSigstoreEnrollment(migrated as any, 1)).toBeNull();
+    expect(enrollmentHashHex(migrated)).not.toBe(enrollmentHashHex(old));
+    expect(migrateEnrollment(migrated)).toBe(migrated);
+  });
+
+  it("migrates an unsigned schema 0 manifest to schema 1 at signing time", async () => {
+    const { migrateManifest } = await import("../src/manifest");
+    const { validateManifest } = await import("@freedomofpress/webcat/webcat/validators");
+    const legacy = (await loadManifestDocument("examples/manifest.json")).manifest;
+    const migrated = migrateManifest(legacy);
+    expect([migrated.manifest_schema, migrated.app, migrated.default_index, migrated.default_fallback]).toEqual([1, undefined, undefined, undefined]);
+    expect(migrated.files["/"]).toBe(legacy.files[`/${legacy.default_index}`]);
+    expect(migrated.fallback_hashes).toEqual([legacy.files[legacy.default_fallback!]]);
+    expect(validateManifest(migrated, 1)).toBeNull();
+    expect(migrateManifest(migrated)).toBe(migrated);
+    expect(() => migrateManifest({ ...legacy, version: "1" })).toThrow("manifest.version must be a semantic version");
+  });
+
+  it("renews a schema 0 manifest as schema 1 from the config it was generated with", async () => {
+    const { validateManifest } = await import("@freedomofpress/webcat/webcat/validators");
+    const legacy = (await loadManifestDocument("examples/manifest.json")).manifest;
+    expect([legacy.manifest_schema, typeof legacy.app, typeof legacy.default_index]).toEqual([undefined, "string", "string"]);
+    expect(validateManifest(legacy)).toBeNull();
+    expect(validateManifest(legacy, 1)?.code).toBe("ERR_WEBCAT_MANIFEST_SCHEMA_DEPRECATED");
+    // The same config, as init wrote it before schema 1, now yields a schema 1 manifest.
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-renew-"));
+    await writeFile(path.join(dir, "index.html"), "home");
+    await writeFile(path.join(dir, "error.html"), "lost");
+    const config = { app: legacy.app, version: "1.12.3", default_csp: legacy.default_csp, default_index: "index.html", default_fallback: "/error.html", wasm: [], extra_csp: {} };
+    await writeFile(path.join(dir, "webcat.config.json"), JSON.stringify(config));
+    const renewed = buildManifest({ ...(await loadManifestConfig(path.join(dir, "webcat.config.json"))), version: "1.12.3" }, await scanDirectory(dir));
+    expect([renewed.manifest_schema, renewed.app, renewed.default_index, renewed.default_fallback]).toEqual([1, undefined, undefined, undefined]);
+    expect(renewed.files["/"]).toBe(renewed.files["/index.html"]);
+    expect(renewed.fallback_hashes).toEqual([renewed.files["/error.html"]]);
+    expect(validateManifest(renewed, 1)).toBeNull();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("history", () => {
+  it("writes hash-named files once, rotates bundle-prev on enrollment change, and flags edits since a ref", async () => {
+    const { checkHistory, enrollmentFileName, manifestFileName, publishBundle, publishEnrollment, writeOnce } = await import("../src/history");
+    const { execFileSync } = await import("node:child_process");
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-history-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    const dir = path.join(repo, ".well-known/webcat");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const document = { manifest: bundle.manifest, signatures: bundle.signatures };
+    await publishEnrollment(dir, enrollment);
+    const written = await publishBundle(dir, enrollment, document);
+    expect(written.map((f) => path.basename(f)).sort()).toEqual([manifestFileName(enrollment, document), "bundle.json"].sort());
+    expect(await checkHistory(dir)).toEqual([]);
+    // A schema 1 manifest lists its fallback by hash; the document is copied from the site into hashes/<hash>.
+    const site = await mkdtemp(path.join(tmpdir(), "webcat-site-"));
+    await writeFile(path.join(site, "404.html"), "<h1>not found</h1>");
+    const fallbackHash = toBase64Url(createHash("sha256").update("<h1>not found</h1>").digest());
+    const { app: _app, default_index: _index, default_fallback: _fallback, ...rest } = bundle.manifest;
+    const versioned = { manifest: { ...rest, manifest_schema: 1, version: "1.0.0", fallback_hashes: [fallbackHash] }, signatures: bundle.signatures };
+    await expect(publishBundle(dir, enrollment, versioned)).resolves.not.toContain(expect.stringContaining("hashes/"));
+    expect(await checkHistory(dir)).toEqual([expect.stringContaining(`lists fallback ${fallbackHash} but hashes/${fallbackHash} is missing`)]);
+    const withFallback = await publishBundle(dir, enrollment, versioned, site);
+    expect(withFallback.map((f) => path.relative(dir, f))).toContain(path.join("hashes", fallbackHash));
+    expect(await checkHistory(dir)).toEqual([]);
+    await writeFile(path.join(dir, "hashes", fallbackHash), "tampered");
+    expect(await checkHistory(dir)).toEqual([expect.stringMatching(/^hashes\/.*: content hashes to .* not to its name$/)]);
+    await rm(path.join(dir, "hashes"), { recursive: true, force: true });
+    await publishBundle(dir, enrollment, document);
+    expect(await writeOnce(dir, enrollmentFileName(enrollment), "different\n").catch((e) => e.message)).toContain("must not change");
+    git("add", "."); git("commit", "-q", "-m", "first");
+    // A new enrollment: the old bundle becomes bundle-prev.json; the old hash files stay.
+    const changed = { ...enrollment, max_age: enrollment.max_age - 1 };
+    await publishEnrollment(dir, changed);
+    const written2 = await publishBundle(dir, changed, document);
+    expect(written2.map((f) => path.basename(f))).toContain("bundle-prev.json");
+    expect(await checkHistory(dir, "HEAD")).toEqual([]);
+    // A record whose CSP the current extension would reject is still history: parsed as a record, refused as new work.
+    const framed = { manifest: { ...document.manifest, default_csp: "default-src 'none'; script-src 'self'; frame-src https://other.example" }, signatures: document.signatures };
+    const { parseManifestDocumentObject } = await import("../src/manifest");
+    expect(() => parseManifestDocumentObject(framed)).toThrow(/sandbox/);
+    const { materializeHistory } = await import("../src/history");
+    const legacy = path.join(repo, "legacy");
+    await mkdir(legacy);
+    await writeFile(path.join(legacy, "bundle.json"), JSON.stringify({ enrollment, ...framed }));
+    expect((await materializeHistory(legacy)).map((f) => path.basename(f))).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, framed)]);
+    expect(await checkHistory(legacy)).toEqual([]);
+    // bundle-prev.json stays while clients can still accept it, and goes once it has expired.
+    const { dropExpiredPrevious } = await import("../src/history");
+    const { verifyBundle } = await import("../src/bundle");
+    const { WebcatError, WebcatErrorCode } = await import("@freedomofpress/webcat/webcat/interfaces/errors");
+    expect(await dropExpiredPrevious(dir)).toBe(false);
+    vi.mocked(verifyBundle).mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.EXPIRED));
+    expect(await dropExpiredPrevious(dir)).toBe(true);
+    expect(await readFile(path.join(dir, "bundle-prev.json"), "utf8").catch(() => "gone")).toBe("gone");
+    expect(await dropExpiredPrevious(dir)).toBe(false);
+    expect(await checkHistory(dir, "HEAD")).toEqual([]);
+    // Editing or deleting a hash-named file is caught against the ref and by the name check.
+    await writeFile(path.join(dir, enrollmentFileName(enrollment)), JSON.stringify({ ...enrollment, max_age: 5 }));
+    await rm(path.join(dir, manifestFileName(enrollment, document)));
+    const problems = await checkHistory(dir, "HEAD");
+    expect(problems.join("\n")).toMatch(/content hashes to .* not to its name/);
+    expect(problems.join("\n")).toMatch(/modified since HEAD/);
+    expect(problems.join("\n")).toMatch(/deleted since HEAD/);
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("inherits the previous release's history from its archive after checking it", async () => {
+    const { archiveRelease, checkHistory, enrollmentFileName, inheritHistory, manifestFileName, publishBundle, publishEnrollment, tar } = await import("../src/history");
+    const { createServer } = await import("node:http");
+    const { execFileSync } = await import("node:child_process");
+    const { verifyBundle } = await import("../src/bundle");
+    const { WebcatError, WebcatErrorCode } = await import("@freedomofpress/webcat/webcat/interfaces/errors");
+    const verify = vi.mocked(verifyBundle);
+    verify.mockResolvedValue(2_000_000_000); // the fixture's signatures are over other files; signed as far as this test goes
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const enrollment = parseEnrollmentObject(bundle.enrollment);
+    const content = "<h1>release 1</h1>";
+    const document = { manifest: { ...bundle.manifest, files: { "/index.html": toBase64Url(createHash("sha256").update(content).digest()) } }, signatures: bundle.signatures };
+    // Release 1 as deployed: the web root with the well-known directory inside, archived the way release does.
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-prev-"));
+    const site = path.join(repo, "dist");
+    await mkdir(site);
+    await writeFile(path.join(site, "index.html"), content);
+    const wellKnown = path.join(repo, ".well-known/webcat");
+    await publishEnrollment(wellKnown, enrollment);
+    await publishBundle(wellKnown, enrollment, document);
+    const archives = await mkdtemp(path.join(tmpdir(), "webcat-archives-"));
+    await archiveRelease(path.join(archives, "good.tgz"), site, wellKnown);
+    expect(execFileSync("tar", ["-tzf", path.join(archives, "good.tgz")], { encoding: "utf8" })).toMatch(/^\.\/index\.html$/m);
+    expect(execFileSync("tar", ["-tzf", path.join(archives, "good.tgz")], { encoding: "utf8" })).toMatch(/^\.well-known\/webcat\/bundle\.json$/m);
+    await writeFile(path.join(site, "index.html"), "<h1>tampered</h1>");
+    await archiveRelease(path.join(archives, "bad.tgz"), site, wellKnown);
+    const server = createServer(async (req, res) => {
+      try {
+        res.end(await readFile(path.join(archives, path.basename(req.url ?? ""))));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const next = path.join(await mkdtemp(path.join(tmpdir(), "webcat-next-")), ".well-known/webcat");
+      const written = await inheritHistory(next, `${base}/good.tgz`);
+      expect(written.map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect(await checkHistory(next)).toEqual([]);
+      // Inheriting again only refreshes the pointer; hash-named files are already there.
+      expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
+      // A bundle the extension would reject is not inherited; one that merely expired since is history as usual.
+      verify.mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.VERIFY_FAILED));
+      await expect(inheritHistory(next, `${base}/good.tgz`)).rejects.toThrow(/bundle\.json does not verify under its own enrollment/);
+      verify.mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.EXPIRED));
+      expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
+      // An archive from the old CLI carries only the pointers: the hash-named files are derived from them.
+      const { materializeHistory, inheritFromSite, publishEnrollment: _pe } = await import("../src/history");
+      const legacyRoot = await mkdtemp(path.join(tmpdir(), "webcat-legacy-"));
+      const legacyWellKnown = path.join(legacyRoot, ".well-known/webcat");
+      await mkdir(legacyWellKnown, { recursive: true });
+      await writeFile(path.join(legacyWellKnown, "enrollment.json"), JSON.stringify(enrollment));
+      await writeFile(path.join(legacyWellKnown, "bundle.json"), JSON.stringify({ enrollment, manifest: document.manifest, signatures: document.signatures }));
+      await archiveRelease(path.join(archives, "legacy.tgz"), site.replace(/dist$/, "dist"), legacyWellKnown).catch(() => undefined);
+      await writeFile(path.join(site, "index.html"), content); // back to what the manifest says
+      await archiveRelease(path.join(archives, "legacy.tgz"), site, legacyWellKnown);
+      const fromLegacy = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromlegacy-")), ".well-known/webcat");
+      expect((await inheritHistory(fromLegacy, `${base}/legacy.tgz`)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect(await checkHistory(fromLegacy)).toEqual([]);
+      // The live site as the source: what it serves under the well-known path, materialized the same way.
+      const siteServer = createServer(async (req, res) => {
+        try {
+          res.end(await readFile(path.join(legacyRoot, decodeURIComponent(req.url ?? "/"))));
+        } catch {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      await new Promise<void>((resolve) => siteServer.listen(0, "127.0.0.1", resolve));
+      const origin = `http://127.0.0.1:${(siteServer.address() as { port: number }).port}`;
+      try {
+        const fromSite = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromsite-")), ".well-known/webcat");
+        expect((await inheritFromSite(fromSite, origin)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+        expect(await checkHistory(fromSite)).toEqual([]);
+        // The site must serve the previous release when one is named: an older one would drop that release from history.
+        await expect(inheritFromSite(fromSite, origin, "v2.0.0")).rejects.toThrow(/is version 1\.0\.0, the previous release is v2\.0\.0/);
+        await inheritFromSite(fromSite, origin, "v1.0.0");
+        // A migrated enrollment published on top: enrollment.json follows the bundle, the inherited bundle becomes bundle-prev.
+        const migrated = { ...enrollment, enrollment_schema: 1 as const };
+        const published = await publishBundle(fromSite, migrated, document);
+        expect(published.map((f) => path.basename(f))).toEqual(expect.arrayContaining(["enrollment.json", "bundle-prev.json", "bundle.json"]));
+        expect(JSON.parse(await readFile(path.join(fromSite, "enrollment.json"), "utf8")).enrollment_schema).toBe(1);
+        expect(await checkHistory(fromSite)).toEqual([]);
+        expect(await materializeHistory(fromSite)).toEqual([]); // nothing left to derive
+      } finally {
+        siteServer.close();
+      }
+      await writeFile(path.join(site, "index.html"), "<h1>tampered</h1>");
+      // An archive whose files do not match the manifest it ships is refused, and so is a missing one.
+      await expect(inheritHistory(next, `${base}/bad.tgz`)).rejects.toThrow(/does not hash as the manifest/);
+      await expect(inheritHistory(next, `${base}/missing.tgz`)).rejects.toThrow(/HTTP 404/);
+      // tar is the same runner release uses for both directions.
+      await expect(tar(["-tzf", path.join(archives, "nope.tgz")])).rejects.toThrow(/failed to run tar/);
+    } finally {
+      server.close();
+      verify.mockReset(); // back to the real verifier
+    }
+  });
+});
+
+describe("release tag checks", () => {
+  it("refuses to sign unless HEAD is the tag, the tag is on the source remote, and CI runs for it", async () => {
+    const { assertReleaseTag } = await import("../src/git");
+    const { execFileSync } = await import("node:child_process");
+    const repo = await mkdtemp(path.join(tmpdir(), "webcat-tag-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo, encoding: "utf8" });
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "one");
+    const remote = await mkdtemp(path.join(tmpdir(), "webcat-remote-"));
+    execFileSync("git", ["init", "-q", "--bare", remote]);
+    git("remote", "add", "origin", remote);
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("HEAD is not tagged, and no tag v1.0.0 exists");
+    git("tag", "v1.0.0");
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("tag v1.0.0 is not on");
+    await expect(assertReleaseTag("v1.0.0", path.join(repo, "nowhere"), {}, repo)).rejects.toThrow("cannot list the tags");
+    git("push", "-q", "origin", "v1.0.0");
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).resolves.toBeUndefined();
+    await expect(assertReleaseTag("v1.0.0", remote, { GITHUB_REF_TYPE: "tag", GITHUB_REF_NAME: "v1.0.0" }, repo)).resolves.toBeUndefined();
+    await expect(assertReleaseTag("v1.0.0", remote, { GITHUB_REF_TYPE: "branch", GITHUB_REF_NAME: "main" }, repo)).rejects.toThrow("runs on branch main, not on tag v1.0.0");
+    git("commit", "-q", "--allow-empty", "-m", "two");
+    await expect(assertReleaseTag("v1.0.0", remote, {}, repo)).rejects.toThrow("HEAD is not tagged)");
+    await rm(repo, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+  });
+});
+
+describe("audit", () => {
+  it("walks a domain's served history and its release archives backwards, and reports what breaks", async () => {
+    const { archiveRelease, publishBundle, publishEnrollment } = await import("../src/history");
+    const { auditDomain, formatAudit } = await import("../src/audit");
+    const { createServer } = await import("node:http");
+    const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
+    const root = await mkdtemp(path.join(tmpdir(), "webcat-audit-"));
+    let enrollment = parseEnrollmentObject(bundle.enrollment);
+    const site = path.join(root, "dist");
+    const wellKnown = path.join(root, ".well-known/webcat");
+    await mkdir(site);
+    await publishEnrollment(wellKnown, enrollment);
+    const leaves: string[] = [];
+    const server = createServer(async (req, res) => {
+      try {
+        const url = req.url ?? "/";
+        if (url === "/log/get-tree-head") return void res.end(`size=${leaves.length}\nroot_hash=00\n`);
+        const page = /^\/log\/get-leaves\/(\d+)\/(\d+)$/.exec(url);
+        if (page) return void res.end(leaves.slice(Number(page[1]), Number(page[2])).join("\n") + "\n");
+        const file = path.join(root, decodeURIComponent(url.split("?")[0]));
+        res.end(await readFile(file.endsWith("/") ? path.join(file, "index.html") : file));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    enrollment = { ...enrollment, logs: { [Object.keys((enrollment as any).logs)[0]]: `${origin}/log` } } as typeof enrollment;
+    await publishEnrollment(wellKnown, enrollment);
+    // Two releases the way release makes them: each archive is the web root with the well-known directory inside.
+    const release = async (version: string, content: string) => {
+      await writeFile(path.join(site, "index.html"), content);
+      const files = { "/index.html": toBase64Url(createHash("sha256").update(content).digest()) };
+      const document = { manifest: { ...bundle.manifest, version, files, artifact: `${origin}/site-\${version}.tar.gz` }, signatures: bundle.signatures };
+      await publishBundle(wellKnown, enrollment, document);
+      await archiveRelease(path.join(root, `site-${version}.tar.gz`), site, wellKnown);
+      return document;
+    };
+    await release("1.0.0", "<h1>one</h1>");
+    const two = await release("1.1.0", "<h1>two</h1>");
+    // The log: the signer's leaf for the served manifest, a stranger's leaf, and a leaf of the signer nobody serves.
+    const { manifestFileName } = await import("../src/history");
+    const signerHash = createHash("sha256").update(Buffer.from((enrollment as any).signers[0], "base64url")).digest("hex");
+    const servedChecksum = manifestFileName(enrollment, two).split(".")[2];
+    leaves.push(`leaf=${servedChecksum} ${"0".repeat(128)} ${signerHash}`, `leaf=${"1".repeat(64)} ${"0".repeat(128)} ${"2".repeat(64)}`, `leaf=${"3".repeat(64)} ${"0".repeat(128)} ${signerHash}`);
+    try {
+      const report = await auditDomain("example.org", { origin });
+      expect(report.bundle).toMatch(/^(VERIFIED|FAILED)/); // the fixture reuses the example signatures over other files
+      const unverifiable = (report.bundle.startsWith("FAILED") ? 1 : 0) + 1; // the failed verdict and the leaf without a file, both problems
+      expect(report.enrollments).toEqual([expect.stringContaining("chain history: work in progress"), expect.stringMatching(/^enrollment\.[0-9a-f]{64}\.json: ok$/)]);
+      // The Sigsum log scan: the served manifest's leaf is found and ok, a second leaf by the same signer has no file.
+      expect(report.logs).toEqual([
+        expect.stringMatching(/^http:.*\/log: 3 leaves, 2 by this domain's signers$/),
+        expect.stringMatching(/^manifest\.sigsum\.[0-9a-f]{64}\.json: ok \(leaf 0 of .*version 1\.1\.0\)$/),
+        expect.stringMatching(/^manifest\.sigsum\.[0-9a-f]{64}\.json: MISSING \(leaf 2 of /),
+      ]);
+      expect(report.manifests).toEqual([expect.stringMatching(/^manifest\.sigsum\.[0-9a-f]{64}\.json: ok/)]);
+      expect(report.releases.map((r) => [r.version, r.problems, r.notes])).toEqual([["1.1.0", [], []], ["1.0.0", [], []]]);
+      expect(report.problems).toBe(unverifiable);
+      expect(formatAudit("example.org", report, true)).toContain("1.0.0: no source declared");
+      // A locally built tree is compared with the served manifest; a stale one is a problem.
+      expect((await auditDomain("example.org", { origin, built: site, version: "1.1.0" })).problems).toBe(unverifiable);
+      await writeFile(path.join(site, "index.html"), "<h1>stale</h1>");
+      expect((await auditDomain("example.org", { origin, built: site, version: "1.1.0" })).releases[0].problems[0]).toMatch(/^built .*index\.html hashes to/);
+      // History obligations: a manifest file that disappears from the site, and a tampered archive, are both caught.
+      const oldManifestFile = (await readdir(wellKnown)).find((n) => n.startsWith("manifest.sigsum.") && !n.includes(two.manifest.version))!;
+      await rm(path.join(root, "site-1.0.0.tar.gz"));
+      const broken = await auditDomain("example.org", { origin });
+      expect(broken.releases.find((r) => r.version === "1.0.0")!.problems[0]).toMatch(/archive .*HTTP 404/);
+      await rm(path.join(wellKnown, oldManifestFile));
+      const gone = await auditDomain("example.org", { origin });
+      expect(gone.releases.find((r) => r.version === "1.1.0")!.problems).toEqual([expect.stringContaining(`${oldManifestFile} was in the 1.1.0 archive but is no longer served`)]);
+      expect(gone.problems).toBeGreaterThan(unverifiable);
+    } finally {
+      server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("rekor scan", () => {
+  it("reads a private Rekor v1 and v2 end to end, matches certificates against the claims, and skips a log that is too big", async () => {
+    const { auditDomain } = await import("../src/audit");
+    const { certificateMatchesClaims, tilePath } = await import("../src/rekor");
+    const { publishBundle, publishEnrollment } = await import("../src/history");
+    const { createServer } = await import("node:http");
+    expect([tilePath(0), tilePath(5), tilePath(1000), tilePath(760316)]).toEqual(["000", "005", "x001/000", "x760/316"]);
+    const fixture = JSON.parse(await readFile("tests/fixtures/sigstore-bundle.json", "utf8"));
+    const signature = fixture.signatures[0];
+    const der = Buffer.from((signature.verificationMaterial.certificate ?? signature.verificationMaterial.x509CertificateChain.certificates[0]).rawBytes, "base64");
+    const v1Body = Buffer.from(signature.verificationMaterial.tlogEntries[0].canonicalizedBody, "base64");
+    const digestHex = JSON.parse(v1Body.toString()).spec.data.hash.value as string;
+    expect(certificateMatchesClaims(der, fixture.enrollment.claims)).toBe(true);
+    expect(certificateMatchesClaims(der, { ...fixture.enrollment.claims, "1.3.6.1.4.1.57264.1.14": "^refs/tags/" })).toBe(false);
+    expect(certificateMatchesClaims(der, { "1.3.6.1.4.1.57264.1.14": "^refs/heads/" })).toBe(true);
+    // A v2 entry of the same release, and a v2 entry of the same identity whose manifest nobody serves.
+    const v2Entry = (digest: Buffer) =>
+      Buffer.from(JSON.stringify({ apiVersion: "0.0.2", kind: "hashedrekord", spec: { hashedRekordV002: { data: { algorithm: "SHA2_256", digest: digest.toString("base64") }, signature: { content: "", verifier: { x509Certificate: { rawBytes: der.toString("base64") } } } } } }));
+    const bundleOf = (entries: Buffer[]) => Buffer.concat(entries.flatMap((e) => [Buffer.from([e.length >> 8, e.length & 255]), e]));
+    const tile = bundleOf([v2Entry(Buffer.from(digestHex, "hex")), v2Entry(Buffer.alloc(32, 7))]);
+    const root = await mkdtemp(path.join(tmpdir(), "webcat-rekor-"));
+    const server = createServer(async (req, res) => {
+      const url = req.url ?? "/";
+      if (url === "/v1/api/v2/checkpoint" || url === "/big/api/v2/checkpoint" && false) return void (res.statusCode = 404, res.end());
+      if (url === "/v1/api/v1/log") return void res.end(JSON.stringify({ treeSize: 2 }));
+      if (url.startsWith("/v1/api/v1/log/entries?logIndex=")) {
+        const i = Number(url.split("=")[1]);
+        return void res.end(JSON.stringify({ [`uuid${i}`]: { body: i === 0 ? v1Body.toString("base64") : Buffer.from(JSON.stringify({ kind: "dsse", spec: {} })).toString("base64") } }));
+      }
+      if (url === "/v2/api/v2/checkpoint") return void res.end("log\n2\nroot\n");
+      if (url === "/v2/api/v2/tile/entries/000.p/2") return void res.end(tile);
+      if (url === "/big/api/v2/checkpoint") return void res.end("log\n194000000\nroot\n");
+      try {
+        res.end(await readFile(path.join(root, decodeURIComponent(url))));
+      } catch {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const enrollment = parseEnrollmentObject({ ...fixture.enrollment, trusted_root: { ...fixture.enrollment.trusted_root, tlogs: [{ baseUrl: `${origin}/v1` }, { baseUrl: `${origin}/v2` }, { baseUrl: `${origin}/big` }] } });
+      const wellKnown = path.join(root, ".well-known/webcat");
+      await publishEnrollment(wellKnown, enrollment);
+      await publishBundle(wellKnown, enrollment, { manifest: fixture.manifest, signatures: fixture.signatures });
+      const report = await auditDomain("lsd.cat", { origin });
+      expect(report.logs).toEqual([
+        `${origin}/v1 (Rekor v1): 2 entries, 1 by this domain's identity`,
+        `${origin}/v2 (Rekor v2): 2 entries, 2 by this domain's identity`,
+        `${origin}/big: 194000000 entries, above --max-log-entries 200000; scanning this log requires an index (TODO)`,
+        expect.stringMatching(new RegExp(`^manifest\\.sigstore\\.${digestHex}\\.json: ok \\(entry 0 of ${origin}/v1`)),
+        expect.stringMatching(new RegExp(`^manifest\\.sigstore\\.${digestHex}\\.json: ok \\(entry 0 of ${origin}/v2`)),
+        expect.stringMatching(/^manifest\.sigstore\.0707.*: MISSING \(entry 1 of .*\/v2\)$/),
+      ]);
+      expect(report.releases.map((r) => r.version)).toEqual([fixture.manifest.version]);
+    } finally {
+      server.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
