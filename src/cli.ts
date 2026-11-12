@@ -11,7 +11,7 @@ import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEn
 import { auditDomain, formatAudit } from "./audit.js";
 import { DEFAULT_MAX_LOG_ENTRIES } from "./rekor.js";
 import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
-import { WELL_KNOWN_DIR, archiveRelease, checkHistory, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce } from "./history.js";
+import { WELL_KNOWN_DIR, archiveRelease, checkHistory, dropExpiredPrevious, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce } from "./history.js";
 import {
   ManifestDocument,
   buildManifest,
@@ -469,7 +469,6 @@ manifest
   .option("-k, --key <path>", "Sigsum signing key: a private key file, or a .pub whose private key is in ssh-agent (hardware tokens)")
   .option("--token-signing-key <path>", "Rate-limit token key: a private key file, or a .pub held in ssh-agent")
   .option("--token-domain <domain>", "Domain name to use for Sigsum rate limiting")
-  .addOption(new Option("--bundle-type <type>", "Sigstore bundle type to generate").choices(["message", "dsse"]).default("message"))
   .option("--fulcio-url <url>", "Sigstore Fulcio base URL", DEFAULT_FULCIO_URL)
   .addOption(
     new Option("--rekor-api-version <version>", "Rekor API major version: 2 (tile-based log, timestamped by a TSA) or 1 (legacy rekor.sigstore.dev)")
@@ -528,9 +527,6 @@ manifest
         tokenDomain: options.tokenDomain,
       });
     } else {
-      if (options.bundleType === "dsse") {
-        log("Warning: WEBCAT verifiers only accept message-signature bundles; a dsse bundle will not verify.");
-      }
       if (options.oidcToken && options.interactive) {
         throw invalid("--oidc-token and --interactive are mutually exclusive");
       }
@@ -556,7 +552,6 @@ manifest
             )
           : ciIdentityProvider(options.oidcAudience);
       await signManifestWithSigstore(document, {
-        bundleType: options.bundleType,
         fulcioUrl: options.fulcioUrl,
         rekorUrl: options.rekorUrl,
         rekorApiVersion: Number(options.rekorApiVersion) as 1 | 2,
@@ -773,7 +768,7 @@ program
     // The previous release's archive carries the history up to it; this release adds its own files on top.
     if (options.history) {
       // The history up to now: the previous release's archive, else what the site serves today (origin in the config).
-      const previous = config.artifact ? await gitPreviousTag() : null;
+      const previous = await gitPreviousTag();
       const archiveUrl = previous && config.artifact ? config.artifact.replace(/\$\{version\}/g, previous) : null;
       let inherited: string[] | null = null;
       if (archiveUrl) {
@@ -785,10 +780,15 @@ program
         if (inherited) log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from release ${previous}`);
       }
       if (!inherited && config.origin) {
-        inherited = await inheritFromSite(WELL_KNOWN_DIR, config.origin);
+        // Versions are tags unless the config pins one; the site must then serve the previous tag, or a release is lost.
+        inherited = await inheritFromSite(WELL_KNOWN_DIR, config.origin, config.version ? undefined : (previous ?? undefined));
         log(`Inherited ${inherited.length} history file${inherited.length === 1 ? "" : "s"} from ${config.origin}`);
       }
       if (!inherited) log(`No previous archive${config.origin ? "" : " and no origin in the config"}: this release starts the history`);
+    }
+    if (await dropExpiredPrevious(WELL_KNOWN_DIR)) {
+      log(`removed ${WELL_KNOWN_DIR}/bundle-prev.json: expired, no client can accept it any more`);
+      await stageInGit([`${WELL_KNOWN_DIR}/bundle-prev.json`], options.commit ? undefined : false, options.commit ? "webcat: drop the expired bundle-prev.json" : undefined);
     }
     await run("bundle", "create", "-m", signed, "--directory", directory, options.commit ? "--commit" : "--no-git");
     if (archive) {

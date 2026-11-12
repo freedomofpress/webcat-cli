@@ -60,7 +60,9 @@ const isRecordOfStrings = (value: unknown): value is Record<string, string> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every((v) => typeof v === "string");
 
 // Everything the extension checks on a manifest, plus its CSP rules on every policy string, plus `more`.
-export function validateManifestContent(manifest: ManifestContent, subject = "manifest", more: Array<() => void> = []): void {
+// policy: false skips the CSP rules, which are the extension's runtime policy of the day, not part of what was signed;
+// a history record is parsed that way, a manifest being written is not.
+export function validateManifestContent(manifest: ManifestContent, subject = "manifest", more: Array<() => void> = [], { policy = true } = {}): void {
   const policies = [["default_csp", manifest.default_csp], ...Object.entries(manifest.extra_csp ?? {}).map(([k, v]) => [`extra_csp['${k}']`, v])];
   validateAll([
     () => check(validateManifest(manifest), subject),
@@ -85,6 +87,7 @@ export function validateManifestContent(manifest: ManifestContent, subject = "ma
       if (typeof csp !== "string") {
         throw invalid(`${subject}.${field} must be a CSP string`);
       }
+      if (!policy) return;
       try {
         validateCSP(csp);
       } catch (err) {
@@ -266,7 +269,7 @@ function parseManifestSignatures(value: unknown): ManifestSignatures | undefined
   return inner;
 }
 
-export function parseManifestDocumentObject(parsed: unknown): ManifestDocument {
+export function parseManifestDocumentObject(parsed: unknown, { policy = true } = {}): ManifestDocument {
   const document = ensureObject(parsed, "manifest");
   const manifest = ensureObject(document.manifest, "manifest.manifest");
   manifest.wasm ??= [];
@@ -274,7 +277,7 @@ export function parseManifestDocumentObject(parsed: unknown): ManifestDocument {
   if (!isRecordOfStrings(manifest.extra_csp)) {
     throw invalid("manifest.manifest.extra_csp must map path prefixes to CSP strings");
   }
-  validateManifestContent(manifest as unknown as ManifestContent, "manifest.manifest");
+  validateManifestContent(manifest as unknown as ManifestContent, "manifest.manifest", [], { policy });
   return { manifest: manifest as unknown as ManifestContent, signatures: parseManifestSignatures(document.signatures) };
 }
 

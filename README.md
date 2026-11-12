@@ -238,7 +238,10 @@ nothing to run on purpose: the commands a release already goes through migrate a
 4. Tag and run `webcat release`, by hand or from the CI job `init` writes. The first
    release inherits the history from the previous tag's archive when `artifact` points at one,
    even one made by the old CLI, else from what `origin` serves today, so the manifest served
-   now stays in the history and the old bundle becomes `bundle-prev.json`.
+   now stays in the history and the old bundle becomes `bundle-prev.json`. Inherited bundles
+   must verify under their own enrollment (expired is fine, unsigned is not), and the site must
+   serve the previous tag's version, or the release stops: `history inherit <origin>` takes
+   what the site serves regardless.
 5. Deploy, then `webcat enrollment submit <domain>`: the enrollment hash changed, and the chain
    must record it. `site check` and `audit` confirm what visitors and auditors see.
 
@@ -462,7 +465,7 @@ into it and never rewrites a hash-named file:
 |------|-----------|
 | `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o` |
 | `bundle.json`, `manifest.sigsum.<checksum>.json` or `manifest.sigstore.<hash>.json` | `bundle create` |
-| `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle |
+| `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle; `release` removes it once it has expired, when no client can accept it any more |
 | `hashes/<hash>` | `bundle create`, one per `fallback_hashes` entry, copied from the built site (`--directory`, or `directory` in the config) |
 
 The history travels with the releases, not with git. The archive `release` writes, the one the

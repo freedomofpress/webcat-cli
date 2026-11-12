@@ -5,13 +5,17 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
+import { WebcatError, WebcatErrorCode } from "@freedomofpress/webcat/webcat/interfaces/errors";
+import { type BundleDocument, parseBundleObject, verifyBundle } from "./bundle.js";
 import { enrollmentHashHex } from "./chain.js";
 import { type Enrollment, EnrollmentTypes, parseEnrollmentObject } from "./enrollment.js";
 import { gitChangedSince } from "./git.js";
 import { type ManifestDocument, canonicalizeManifestBody, parseManifestDocumentObject, scanDirectory } from "./manifest.js";
-import { causeOf, external, fetchOk, invalid, log, sha256, toBase64Url } from "./utils.js";
+import { causeOf, describeWebcatError, external, fetchOk, invalid, log, sha256, toBase64Url } from "./utils.js";
 
 export const WELL_KNOWN_DIR = ".well-known/webcat";
+// History records were valid when published; the CSP rules of the current extension do not decide what is kept.
+const RECORD = { policy: false };
 export const HASH_FILE = /^(enrollment|manifest\.sigsum|manifest\.sigstore)\.([0-9a-f]{64})\.json$/;
 // Each fallback document of a manifest, under its base64url hash (spec manifest.md fallback_hashes).
 export const HASHES_DIR = "hashes";
@@ -103,6 +107,19 @@ export async function publishBundle(dir: string, enrollment: Enrollment, documen
   return written;
 }
 
+// bundle-prev.json serves clients that still hold the old enrollment: the chain's cool-down, then everyone whose list
+// has not caught up. Once it has expired no client can accept it, so only then is it removed; its hash-named files
+// stay in the history.
+export async function dropExpiredPrevious(dir: string): Promise<boolean> {
+  const previous = path.join(dir, "bundle-prev.json");
+  const text = await readFile(previous, "utf8").catch(() => null);
+  if (text === null) return false;
+  const result = await verifyBundle(parseBundleObject(JSON.parse(text), previous, RECORD));
+  if (!(result instanceof WebcatError && result.code === WebcatErrorCode.Manifest.EXPIRED)) return false;
+  await rm(previous);
+  return true;
+}
+
 // A directory from before the history files existed (the old CLI, or a hand-made deploy) has only the pointers.
 // The hash-named files are derived from them: the bundle carries the enrollment and the signed manifest in full.
 export async function materializeHistory(dir: string): Promise<string[]> {
@@ -120,7 +137,7 @@ export async function materializeHistory(dir: string): Promise<string[]> {
       const enrollment = parseEnrollmentObject(name === "enrollment.json" ? parsed : parsed.enrollment);
       if (await writeOnce(dir, enrollmentFileName(enrollment), pretty(enrollment))) written.push(path.join(dir, enrollmentFileName(enrollment)));
       if (name !== "enrollment.json") {
-        const document = parseManifestDocumentObject({ manifest: parsed.manifest, signatures: parsed.signatures });
+        const document = parseManifestDocumentObject({ manifest: parsed.manifest, signatures: parsed.signatures }, RECORD);
         const manifestName = manifestFileName(enrollment, document);
         if (await writeOnce(dir, manifestName, pretty({ manifest: document.manifest, signatures: document.signatures }))) written.push(path.join(dir, manifestName));
       }
@@ -153,7 +170,7 @@ export async function checkHistory(dir: string, ref?: string): Promise<string[]>
       if (m[1] === "enrollment") {
         actual = enrollmentHash(parseEnrollmentObject(parsed));
       } else {
-        const document = parseManifestDocumentObject(parsed);
+        const document = parseManifestDocumentObject(parsed, RECORD);
         const digest = sha256(canonicalizeManifestBody(document));
         actual = m[1] === "manifest.sigsum" ? sha256(digest).toString("hex") : digest.toString("hex");
       }
@@ -171,7 +188,7 @@ export async function checkHistory(dir: string, ref?: string): Promise<string[]>
       const enrollment = parseEnrollmentObject(part === "enrollment" ? parsed : parsed.enrollment);
       if (!names.includes(enrollmentFileName(enrollment))) problems.push(`${pointer}: its enrollment has no ${enrollmentFileName(enrollment)}`);
       if (part === "bundle") {
-        const document = parseManifestDocumentObject({ manifest: parsed.manifest, signatures: parsed.signatures });
+        const document = parseManifestDocumentObject({ manifest: parsed.manifest, signatures: parsed.signatures }, RECORD);
         const expected = manifestFileName(enrollment, document);
         const stored = await readFile(path.join(dir, expected), "utf8").catch(() => null);
         if (stored === null) problems.push(`${pointer}: its manifest has no ${expected}`);
@@ -240,6 +257,25 @@ export async function verifyArchiveFiles(site: string, document: ManifestDocumen
   return problems;
 }
 
+// The pointers a history is inherited from must be bundles the extension accepted: signed by their own enrollment's
+// signers. Only EXPIRED passes among the verifier's errors, since it comes after the signature checks and a history
+// legitimately holds releases older than max_age. Returns bundle.json's manifest.
+async function assertSignedPointers(dir: string, subject: string): Promise<ManifestDocument> {
+  let current: BundleDocument | undefined;
+  for (const name of ["bundle.json", "bundle-prev.json"]) {
+    const text = await readFile(path.join(dir, name), "utf8").catch(() => null);
+    if (text === null) continue;
+    const bundle = parseBundleObject(JSON.parse(text), `${subject} ${name}`, RECORD);
+    const result = await verifyBundle(bundle);
+    if (result instanceof WebcatError && result.code !== WebcatErrorCode.Manifest.EXPIRED) {
+      throw invalid(`${subject}: ${name} does not verify under its own enrollment (${describeWebcatError(result)}); not inheriting its history`);
+    }
+    if (name === "bundle.json") current = bundle;
+  }
+  if (!current) throw invalid(`${subject}: no bundle.json`);
+  return current.manifest;
+}
+
 // Release n inherits the well-known directory from release n-1's archive: hash-named files, fallback documents and the
 // bundle pointers. The archive is first checked against the manifest it ships and its own hash-named files, so a
 // release only inherits history from a predecessor that was what it claimed.
@@ -251,8 +287,7 @@ export async function inheritHistory(dir: string, archiveUrl: string): Promise<s
       log(`Warning: ${archiveUrl} carries no ${WELL_KNOWN_DIR}/bundle.json; nothing to inherit`);
       return [];
     }
-    const bundle = JSON.parse(bundleText);
-    const document = parseManifestDocumentObject({ manifest: bundle.manifest, signatures: bundle.signatures });
+    const document = await assertSignedPointers(previous, archiveUrl);
     const mismatched = await verifyArchiveFiles(site, document);
     if (mismatched.length > 0) {
       throw invalid(`${archiveUrl}: ${mismatched[0].split(" ")[0]} is missing or does not hash as the manifest of release ${document.manifest.version} says; not inheriting its history`);
@@ -291,8 +326,9 @@ async function copyHistory(from: string, dir: string): Promise<string[]> {
 
 // The live site as the history source: what it serves under the well-known path, pointers and the hash-named files
 // they lead to. The first release with this CLI inherits from here, so the manifest served today stays in the history
-// and the previous bundle is there to rotate when the enrollment migrates.
-export async function inheritFromSite(dir: string, origin: string): Promise<string[]> {
+// and the previous bundle is there to rotate when the enrollment migrates. With previousVersion, the site must serve
+// that release: an older one means a release never reached the site, and its history would be dropped here.
+export async function inheritFromSite(dir: string, origin: string, previousVersion?: string): Promise<string[]> {
   const base = `${origin.replace(/\/+$/, "")}/${WELL_KNOWN_DIR}`;
   const work = await mkdtemp(path.join(tmpdir(), "webcat-site-"));
   try {
@@ -314,6 +350,11 @@ export async function inheritFromSite(dir: string, origin: string): Promise<stri
     if (bundle === null) throw external(`${base}/bundle.json is not served; nothing to inherit from the site`);
     await get("bundle-prev.json");
     await get("enrollment.json");
+    const document = await assertSignedPointers(work, base);
+    const version = String(document.manifest.version);
+    if (previousVersion !== undefined && version.replace(/^v/, "") !== previousVersion.replace(/^v/, "")) {
+      throw invalid(`${base}/bundle.json is version ${version}, the previous release is ${previousVersion}: its history is not on the site. Deploy it, publish its archive, or inherit by hand (history inherit ${origin}) and pass --no-history`);
+    }
     await materializeHistory(work);
     // Hash-named files the site already serves for what the pointers name, so a later audit finds the same bytes.
     for (const name of await readdir(work)) {
@@ -321,7 +362,7 @@ export async function inheritFromSite(dir: string, origin: string): Promise<stri
       const served = await get(name);
       if (served !== null) await writeFile(path.join(work, name), served);
     }
-    for (const hash of parseManifestDocumentObject({ manifest: JSON.parse(bundle).manifest, signatures: JSON.parse(bundle).signatures }).manifest.fallback_hashes ?? []) {
+    for (const hash of document.manifest.fallback_hashes ?? []) {
       const response = await fetch(`${base}/${HASHES_DIR}/${hash}`).catch(() => null);
       if (response?.ok) {
         await mkdir(path.join(work, HASHES_DIR), { recursive: true });

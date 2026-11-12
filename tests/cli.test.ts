@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -22,6 +22,12 @@ import {
   toBase64Url,
   validateMaxAge,
 } from "../src/utils";
+
+// The history fixtures reuse the example signatures over other files; the inherit test steers the verifier.
+vi.mock("../src/bundle", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/bundle")>();
+  return { ...real, verifyBundle: vi.fn(real.verifyBundle) };
+});
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -792,6 +798,26 @@ describe("history", () => {
     const written2 = await publishBundle(dir, changed, document);
     expect(written2.map((f) => path.basename(f))).toContain("bundle-prev.json");
     expect(await checkHistory(dir, "HEAD")).toEqual([]);
+    // A record whose CSP the current extension would reject is still history: parsed as a record, refused as new work.
+    const framed = { manifest: { ...document.manifest, default_csp: "default-src 'none'; script-src 'self'; frame-src https://other.example" }, signatures: document.signatures };
+    const { parseManifestDocumentObject } = await import("../src/manifest");
+    expect(() => parseManifestDocumentObject(framed)).toThrow(/sandbox/);
+    const { materializeHistory } = await import("../src/history");
+    const legacy = path.join(repo, "legacy");
+    await mkdir(legacy);
+    await writeFile(path.join(legacy, "bundle.json"), JSON.stringify({ enrollment, ...framed }));
+    expect((await materializeHistory(legacy)).map((f) => path.basename(f))).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, framed)]);
+    expect(await checkHistory(legacy)).toEqual([]);
+    // bundle-prev.json stays while clients can still accept it, and goes once it has expired.
+    const { dropExpiredPrevious } = await import("../src/history");
+    const { verifyBundle } = await import("../src/bundle");
+    const { WebcatError, WebcatErrorCode } = await import("@freedomofpress/webcat/webcat/interfaces/errors");
+    expect(await dropExpiredPrevious(dir)).toBe(false);
+    vi.mocked(verifyBundle).mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.EXPIRED));
+    expect(await dropExpiredPrevious(dir)).toBe(true);
+    expect(await readFile(path.join(dir, "bundle-prev.json"), "utf8").catch(() => "gone")).toBe("gone");
+    expect(await dropExpiredPrevious(dir)).toBe(false);
+    expect(await checkHistory(dir, "HEAD")).toEqual([]);
     // Editing or deleting a hash-named file is caught against the ref and by the name check.
     await writeFile(path.join(dir, enrollmentFileName(enrollment)), JSON.stringify({ ...enrollment, max_age: 5 }));
     await rm(path.join(dir, manifestFileName(enrollment, document)));
@@ -806,6 +832,10 @@ describe("history", () => {
     const { archiveRelease, checkHistory, enrollmentFileName, inheritHistory, manifestFileName, publishBundle, publishEnrollment, tar } = await import("../src/history");
     const { createServer } = await import("node:http");
     const { execFileSync } = await import("node:child_process");
+    const { verifyBundle } = await import("../src/bundle");
+    const { WebcatError, WebcatErrorCode } = await import("@freedomofpress/webcat/webcat/interfaces/errors");
+    const verify = vi.mocked(verifyBundle);
+    verify.mockResolvedValue(2_000_000_000); // the fixture's signatures are over other files; signed as far as this test goes
     const bundle = JSON.parse(await readFile("examples/bundle.json", "utf8"));
     const enrollment = parseEnrollmentObject(bundle.enrollment);
     const content = "<h1>release 1</h1>";
@@ -841,6 +871,11 @@ describe("history", () => {
       expect(await checkHistory(next)).toEqual([]);
       // Inheriting again only refreshes the pointer; hash-named files are already there.
       expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
+      // A bundle the extension would reject is not inherited; one that merely expired since is history as usual.
+      verify.mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.VERIFY_FAILED));
+      await expect(inheritHistory(next, `${base}/good.tgz`)).rejects.toThrow(/bundle\.json does not verify under its own enrollment/);
+      verify.mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.EXPIRED));
+      expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
       // An archive from the old CLI carries only the pointers: the hash-named files are derived from them.
       const { materializeHistory, inheritFromSite, publishEnrollment: _pe } = await import("../src/history");
       const legacyRoot = await mkdtemp(path.join(tmpdir(), "webcat-legacy-"));
@@ -869,6 +904,9 @@ describe("history", () => {
         const fromSite = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromsite-")), ".well-known/webcat");
         expect((await inheritFromSite(fromSite, origin)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
         expect(await checkHistory(fromSite)).toEqual([]);
+        // The site must serve the previous release when one is named: an older one would drop that release from history.
+        await expect(inheritFromSite(fromSite, origin, "v2.0.0")).rejects.toThrow(/is version 1\.0\.0, the previous release is v2\.0\.0/);
+        await inheritFromSite(fromSite, origin, "v1.0.0");
         // A migrated enrollment published on top: enrollment.json follows the bundle, the inherited bundle becomes bundle-prev.
         const migrated = { ...enrollment, enrollment_schema: 1 as const };
         const published = await publishBundle(fromSite, migrated, document);
@@ -887,6 +925,7 @@ describe("history", () => {
       await expect(tar(["-tzf", path.join(archives, "nope.tgz")])).rejects.toThrow(/failed to run tar/);
     } finally {
       server.close();
+      verify.mockReset(); // back to the real verifier
     }
   });
 });
