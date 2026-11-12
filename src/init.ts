@@ -7,7 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
-import { forgeOf, releaseWorkflow, verifyWorkflow, workflowDir } from "./ci.js";
+import { ciJobs, forgeOf } from "./ci.js";
 import { gitRemote, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, publishEnrollment } from "./history.js";
 import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
@@ -277,16 +277,11 @@ export async function runInit(options: InitOptions): Promise<void> {
   const forge = forgeOf(a.source);
   const workflows: string[] = [];
   if (forge && a.workflows !== false) {
-    const jobs: Array<[string, string | null]> = [
-      ["webcat-release.yml", releaseWorkflow({ forge, type: a.type, host, directory: a.directory ?? "dist", tokenKey: Boolean(tokenHex), artifact: Boolean(a.artifact) })],
-      ["webcat-verify.yml", verifyWorkflow({ forge, host })],
-    ];
-    await mkdir(`${a.dir}/${workflowDir(forge)}`, { recursive: true });
-    for (const [name, text] of jobs) {
-      const file = `${workflowDir(forge)}/${name}`;
-      if (text === null) log(`Warning: Forgejo Actions issue no OIDC identity, so no ${file}: sign with --interactive, or release from GitHub Actions`);
+    for (const [file, text] of ciJobs({ forge, type: a.type, host, directory: a.directory ?? "dist", token: Boolean(tokenHex), artifact: Boolean(a.artifact) })) {
+      if (text === null) log(`Warning: Forgejo Actions issue no OIDC identity, so no ${file}: sign with --interactive, or release from GitHub or GitLab`);
       else if (await access(`${a.dir}/${file}`).then(() => true, () => false)) log(`kept ${file} (exists)`);
       else {
+        await mkdir(path.dirname(`${a.dir}/${file}`), { recursive: true });
         await writeFile(`${a.dir}/${file}`, text);
         workflows.push(file);
         log(`wrote ${file}`);

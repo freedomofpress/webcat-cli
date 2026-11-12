@@ -15,7 +15,8 @@
     "webcat": "dist/cli.cjs"
   },
   "files": [
-    "dist/cli.cjs"
+    "dist/cli.cjs",
+    "templates"
   ],
   "scripts": {
     "start": "tsx src/cli.ts",

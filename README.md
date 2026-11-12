@@ -500,10 +500,11 @@ so the clone must not be shallow.
 `https://github.com/acme/site/releases/download/${version}/site-${version}.tar.gz`;
 `release` writes `site-<version>.tar.gz` in the working directory for the job to upload.
 
-`init` writes both jobs below into your repository for the forge `source` points at
-(`.github/workflows/` on GitHub, `.forgejo/workflows/` on Codeberg and other Forgejo or Gitea
-hosts), with your host, build directory and keys filled in, and never overwrites an existing
-file. They are plain files you own: no reusable workflow from this repository is involved, so
+`init` writes the jobs below into your repository for the CI system `source` points at
+(`.github/workflows/` on GitHub, `.gitlab-ci.yml` on GitLab, `.forgejo/workflows/` on Codeberg
+and other Forgejo or Gitea hosts), with your host, build directory and keys filled in, and never
+overwrites an existing file. The jobs are templates under `templates/` in this package, one per
+CI system and signing type. They are plain files you own: no reusable workflow from this repository is involved, so
 the identity in your certificates is your own workflow and nothing here can break your release.
 Pass `--no-workflows` to skip them. The same text, to copy by hand:
 
@@ -522,7 +523,7 @@ on:
   push:
     tags: ["v*"]
 permissions:
-  contents: write
+  contents: write     # upload the archive to the release
   id-token: write     # the Sigstore identity the enrollment names
 jobs:
   release:
@@ -536,7 +537,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci && npm run build                          # must produce dist/
-      - run: npm install -g @freedomofpress/webcat-cli@0.1.2
+      - run: npm install -g @freedomofpress/webcat-cli@0.2.0
       - run: webcat release --type sigstore
       - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
         env:
@@ -557,12 +558,13 @@ elsewhere.
 # .forgejo/workflows/webcat-release.yml
 # Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
 # The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# Secrets: SIGSUM_KEY, the private signing key; SIGSUM_TOKEN_KEY, the rate-limit token key.
 name: WEBCAT release
 on:
   push:
     tags: ["v*"]
 permissions:
-  contents: write
+  contents: write     # upload the archive to the release
 jobs:
   release:
     runs-on: docker
@@ -579,9 +581,9 @@ jobs:
       - uses: https://code.forgejo.org/actions/setup-go@v5
         with:
           go-version: stable
-      - run: npm ci && npm run build                          # must produce dist/
-      - run: npm install -g @freedomofpress/webcat-cli@0.1.2
       - run: go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - run: npm ci && npm run build                          # must produce dist/
+      - run: npm install -g @freedomofpress/webcat-cli@0.2.0
       - run: |
           install -m 600 /dev/stdin keys/key1 <<< "$SIGSUM_KEY"
           install -m 600 /dev/stdin keys/token <<< "$SIGSUM_TOKEN_KEY"
@@ -596,6 +598,45 @@ jobs:
           release-dir: release
       - run: cp -r .well-known dist/
       # deploy dist/ as usual; webcat-verify.yml then checks what visitors and auditors see
+```
+
+#### GitLab CI, Sigstore or Sigsum
+
+One `.gitlab-ci.yml` carries both jobs. GitLab runners issue an OIDC token, so Sigstore signs
+there too; archives go to the project's generic package registry, which is what `artifact`
+points at.
+
+```yaml
+# .gitlab-ci.yml
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# Archives go to the generic package registry: artifact in webcat.config.json is
+# $CI_API_V4_URL/projects/<id>/packages/generic/site/${version}/site-${version}.tar.gz
+image: node:22
+
+release:
+  rules:
+    - if: $CI_COMMIT_TAG
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - npm ci && npm run build                          # must produce public/
+    - npm install -g @freedomofpress/webcat-cli@0.2.0
+    - webcat release --type sigstore --oidc-token "$SIGSTORE_ID_TOKEN"
+    - 'curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file site-$CI_COMMIT_TAG.tar.gz "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/site/$CI_COMMIT_TAG/site-$CI_COMMIT_TAG.tar.gz"'
+    - cp -r .well-known public/
+    # deploy public/ as usual; the verify job then checks what visitors and auditors see
+
+verify:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - npm install -g @freedomofpress/webcat-cli@0.2.0
+    - webcat site check example.org
+    - webcat audit example.org
 ```
 
 #### Verifying the live site on a schedule
@@ -620,7 +661,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install -g @freedomofpress/webcat-cli@0.1.2
+      - run: npm install -g @freedomofpress/webcat-cli@0.2.0
       - run: webcat site check example.org
       - run: webcat audit example.org
 ```

@@ -554,7 +554,7 @@ describe("init", () => {
 
   it("writes the site's own CI jobs for the forge of source, and never a second time", async () => {
     const { runInit } = await import("../src/init");
-    const { releaseWorkflow } = await import("../src/ci");
+    const { ciJobs, render } = await import("../src/ci");
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-init-ci-"));
     const flags = { dir, origin: "https://example.org", type: "sigstore" as const, identity: "a@b", issuer: "https://accounts.google.com", source: "https://github.com/o/r", artifact: "https://github.com/o/r/releases/download/${version}/site-${version}.tar.gz" };
     await runInit(flags);
@@ -576,12 +576,22 @@ describe("init", () => {
     await writeFile(path.join(dir, ".github/workflows/webcat-release.yml"), "mine");
     await runInit(flags);
     expect(await readFile(path.join(dir, ".github/workflows/webcat-release.yml"), "utf8")).toBe("mine");
+    // The renderer: values, and blocks kept or dropped whole, whether they own a line or sit inline.
+    expect(render("a {{x}}\n{{#t}}\nkept\n{{/t}}\n{{#f}}\ndropped\n{{/f}}\nb{{#t}} in{{/t}}{{#f}} out{{/f}}\n", { x: "1", t: true, f: false })).toBe("a 1\nkept\nb in\n");
     // Sigsum on a Forgejo: the key secrets and the forge's own actions; Sigstore there has no identity to sign with.
-    const forgejo = releaseWorkflow({ forge: "forgejo", type: "sigsum", host: "example.org", directory: "dist", tokenKey: true, artifact: true })!;
-    expect(forgejo).toContain("SIGSUM_TOKEN_KEY");
-    expect(forgejo).toContain("--token-domain example.org");
-    expect(forgejo).toContain("code.forgejo.org/actions/checkout");
-    expect(releaseWorkflow({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", tokenKey: false, artifact: false })).toBeNull();
+    const forgejo = ciJobs({ forge: "forgejo", type: "sigsum", host: "example.org", directory: "dist", token: true, artifact: true });
+    expect(forgejo.map(([f]) => f)).toEqual([".forgejo/workflows/webcat-release.yml", ".forgejo/workflows/webcat-verify.yml"]);
+    expect(forgejo[0][1]).toContain("SIGSUM_TOKEN_KEY");
+    expect(forgejo[0][1]).toContain("--token-domain example.org");
+    expect(forgejo[0][1]).toContain("code.forgejo.org/actions/checkout");
+    expect(forgejo[0][1]).not.toMatch(/\{\{[#/]?\w+\}\}/); // ${{ secrets.X }} is GitHub syntax and stays
+    expect(ciJobs({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", token: false, artifact: false })[0][1]).toBeNull();
+    // GitLab: one file, the id token for Sigstore, no archive upload without an artifact.
+    const gitlab = ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false });
+    expect(gitlab.map(([f]) => f)).toEqual([".gitlab-ci.yml"]);
+    expect(gitlab[0][1]).toContain("SIGSTORE_ID_TOKEN");
+    expect(gitlab[0][1]).not.toContain("--upload-file"); // no archive to publish
+    expect(gitlab[0][1]).toContain("cp -r .well-known public/");
     await rm(dir, { recursive: true, force: true });
   });
 });

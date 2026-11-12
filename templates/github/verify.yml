@@ -1,0 +1,18 @@
+# Written by webcat init. Checks the live site the way the extension and the auditors do; a failure is a broken site.
+name: WEBCAT verify
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+      - run: webcat site check {{host}}
+      - run: webcat audit {{host}}
