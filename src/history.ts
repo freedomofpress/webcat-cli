@@ -223,7 +223,7 @@ export async function archiveRelease(archive: string, siteDirectory: string, dir
   const base = path.resolve(dir, "../..");
   const plain = `${archive}.tar`;
   // Two steps: an exclude pattern given with the first directory would also drop the entry appended from the second.
-  await tar(["-cf", plain, "-C", siteDirectory, `--exclude=./${WELL_KNOWN_DIR}`, "."]);
+  await tar(["-cf", plain, "-C", siteDirectory, `--exclude=./${WELL_KNOWN_DIR}`, "--exclude=./.git", "."]); // a site served from its repository root
   await tar(["-rf", plain, "-C", base, path.relative(base, path.resolve(dir))]);
   await writeFile(archive, gzipSync(await readFile(plain)));
   await rm(plain, { force: true });
