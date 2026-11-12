@@ -7,7 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { validateCSP } from "@freedomofpress/webcat/webcat/validators";
 import { buildEnrollmentObject, signerFromValue } from "./enrollment.js";
 import { builtinPolicyText, deriveSignerKeyFromPrivateKey, generateSigsumKey, generateSigsumKeys, sigsumEnrollmentFromPolicy } from "./sigsum.js";
-import { ciJobs, forgeOf, sigstoreFromCi } from "./ci.js";
+import { ciIssuer, ciJobs, forgeOf, sigstoreFromCi } from "./ci.js";
 import { gitRemote, gitTagAtHead } from "./git.js";
 import { WELL_KNOWN_DIR, publishEnrollment } from "./history.js";
 import { fetchCommunityTrustedRoot, ISSUER_V2_OID, SAN_OID, withoutRekorV1 } from "./sigstore.js";
@@ -160,8 +160,12 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
     const directory = options.directory ?? (await ask("directory", "Which directory does your build write the site into?", "dist"));
     const type = (options.type ??
       (await choose("type", "Which signing mechanism do you want to use?", [["sigsum", "you hold the signing keys; works from any CI"], ["sigstore", "sign from CI with an OIDC identity; GitHub and gitlab.com only"]], "sigsum"))) as "sigsum" | "sigstore";
-    if (type === "sigstore" && source && !sigstoreFromCi(source)) {
-      log(`Warning: the public Sigstore CA certifies identities from GitHub and gitlab.com only; ${new URL(source).host} issues none it accepts, so no CI job can sign there. Choose sigsum, or sign with --interactive`);
+    const oidc = type === "sigstore" && (await sigstoreFromCi(source));
+    if (type === "sigstore" && source && !oidc) {
+      const issuer = ciIssuer(source);
+      log(
+        `Warning: the Sigstore CA does not certify ${issuer ? `identities from ${issuer}` : `any identity from ${new URL(source).host}: Forgejo and Gitea Actions issue none`}, so no CI job can sign there${issuer ? " (the Sigstore project adds self-hosted GitLab instances on request)" : ""}. Choose sigsum, or sign with --interactive`,
+      );
     }
     let csp = options.csp;
     if (!csp) {
@@ -192,7 +196,7 @@ async function answers(options: InitOptions): Promise<Required<Pick<InitOptions,
       rest.identity ??= tagPrefixIdentity(
         await ask("identity", "Which identity signs your releases? An email, or a workflow URL; a ^ prefix matches every ref it starts with (release tags)", workflowIdentity),
       );
-      rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
+      rest.issuer ??= await ask("issuer", "Which OIDC issuer vouches for that identity?", ciIssuer(source) ?? "https://token.actions.githubusercontent.com", httpsUrl("issuer"));
     }
     return { ...rest, origin, version, type, csp, maxAge, source, artifact, directory };
   } finally {
@@ -280,7 +284,7 @@ export async function runInit(options: InitOptions): Promise<void> {
   const forge = forgeOf(a.source);
   const workflows: string[] = [];
   if (forge && a.workflows !== false) {
-    for (const [file, text] of ciJobs({ forge, type: a.type, host, directory: a.directory ?? "dist", token: Boolean(tokenHex), artifact: Boolean(a.artifact), oidc: sigstoreFromCi(a.source) })) {
+    for (const [file, text] of ciJobs({ forge, type: a.type, host, directory: a.directory ?? "dist", token: Boolean(tokenHex), artifact: Boolean(a.artifact), oidc: a.type === "sigstore" && (await sigstoreFromCi(a.source)) })) {
       if (text === null) log(`no ${file}: this CI cannot sign with Sigstore (see above)`);
       else if (await access(`${a.dir}/${file}`).then(() => true, () => false)) log(`kept ${file} (exists)`);
       else {

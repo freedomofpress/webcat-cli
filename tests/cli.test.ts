@@ -587,8 +587,22 @@ describe("init", () => {
     expect(forgejo[0][1]).not.toMatch(/\{\{[#/]?\w+\}\}/); // ${{ secrets.X }} is GitHub syntax and stays
     expect(ciJobs({ forge: "forgejo", type: "sigstore", host: "example.org", directory: "dist", token: false, artifact: false, oidc: false })[0][1]).toBeNull();
     // Only GitHub and gitlab.com issue identities the public Sigstore CA certifies; a self-hosted GitLab gets no Sigstore job.
-    const { sigstoreFromCi } = await import("../src/ci");
-    expect([sigstoreFromCi("https://github.com/o/r"), sigstoreFromCi("https://gitlab.com/o/r"), sigstoreFromCi("https://git.example.org/o/r"), sigstoreFromCi(undefined)]).toEqual([true, true, false, false]);
+    const { sigstoreFromCi, ciIssuer } = await import("../src/ci");
+    expect([ciIssuer("https://github.com/o/r"), ciIssuer("https://gitlab.example.org/o/r"), ciIssuer("https://codeberg.org/o/r"), ciIssuer(undefined)]).toEqual(["https://token.actions.githubusercontent.com", "https://gitlab.example.org", null, null]);
+    // Asked from Fulcio's configuration: a self-hosted GitLab it lists signs, one it does not list does not; offline, the two known ones.
+    const { createServer } = await import("node:http");
+    const fulcio = createServer((_req, res) => res.end(JSON.stringify({ issuers: [{ issuerUrl: "https://gitlab.example.org", issuerType: "ci-provider" }] })));
+    await new Promise<void>((resolve) => fulcio.listen(0, "127.0.0.1", resolve));
+    const fulcioUrl = `http://127.0.0.1:${(fulcio.address() as { port: number }).port}`;
+    try {
+      expect(await sigstoreFromCi("https://gitlab.example.org/o/r", fulcioUrl)).toBe(true);
+      expect(await sigstoreFromCi("https://github.com/o/r", fulcioUrl)).toBe(false);
+      expect(await sigstoreFromCi("https://codeberg.org/o/r", fulcioUrl)).toBe(false);
+    } finally {
+      fulcio.close();
+    }
+    expect(await sigstoreFromCi("https://github.com/o/r", "http://127.0.0.1:1")).toBe(true);
+    expect(await sigstoreFromCi("https://gitlab.example.org/o/r", "http://127.0.0.1:1")).toBe(false);
     expect(ciJobs({ forge: "gitlab", type: "sigstore", host: "example.org", directory: "public", token: false, artifact: false, oidc: false })[0][1]).toBeNull();
     expect(ciJobs({ forge: "gitlab", type: "sigsum", host: "example.org", directory: "public", token: false, artifact: false, oidc: false })[0][1]).toContain("webcat release -k keys/key1");
     // GitLab.com: one file, the id token for Sigstore, no archive upload without an artifact.

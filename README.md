@@ -604,8 +604,10 @@ jobs:
 
 One `.gitlab-ci.yml` carries both jobs. gitlab.com runners issue an OIDC token the public
 Sigstore CA certifies, so Sigstore signs there too; archives go to the project's generic package
-registry, which is what `artifact` points at. A self-hosted GitLab, like Forgejo and Gitea, has
-no such identity: `init` says so and the Sigsum job is the one that works there.
+registry, which is what `artifact` points at. Whether a self-hosted GitLab can sign is asked
+from the Sigstore CA's own configuration: the Sigstore project lists such instances on request
+(`gitlab.archlinux.org` is one). Forgejo and Gitea Actions issue no identity at all. Where
+Sigstore cannot sign, `init` says so and the Sigsum job is the one that works.
 
 ```yaml
 # .gitlab-ci.yml

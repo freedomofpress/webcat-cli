@@ -20,15 +20,27 @@ export function forgeOf(source: string | undefined): Forge | null {
   }
 }
 
-// Whether the public Sigstore CA certifies the identities this remote's CI issues: GitHub and gitlab.com do, nothing
-// self-hosted does, and Forgejo and Gitea issue none. Elsewhere Sigsum is the signing that works from CI.
-export const sigstoreFromCi = (source: string | undefined): boolean => {
+// The OIDC issuer the remote's CI signs with: GitHub Actions has one for everyone, a GitLab is its own, and Forgejo
+// and Gitea Actions issue none.
+export function ciIssuer(source: string | undefined): string | null {
+  const forge = forgeOf(source);
+  if (forge === "github") return "https://token.actions.githubusercontent.com";
+  if (forge === "gitlab") return `https://${new URL(source!).host}`;
+  return null;
+}
+
+// Whether the Sigstore CA certifies that issuer: asked from its live configuration, so a self-hosted GitLab the
+// Sigstore project has added works without a CLI change. Offline, the two it has always had.
+export async function sigstoreFromCi(source: string | undefined, fulcioUrl = "https://fulcio.sigstore.dev"): Promise<boolean> {
+  const issuer = ciIssuer(source);
+  if (!issuer) return false;
   try {
-    return ["github.com", "gitlab.com"].includes(new URL(source ?? "").host);
+    const config = await (await fetch(`${fulcioUrl.replace(/\/+$/, "")}/api/v2/configuration`)).json();
+    return (config.issuers as Array<{ issuerUrl?: string }>).some((i) => i.issuerUrl === issuer);
   } catch {
-    return false;
+    return ["https://token.actions.githubusercontent.com", "https://gitlab.com"].includes(issuer);
   }
-};
+}
 
 // {{name}} is a value; {{#name}}...{{/name}} is kept when the value is true, dropped otherwise (a whole line when alone on it).
 export function render(template: string, vars: Record<string, string | boolean>): string {
