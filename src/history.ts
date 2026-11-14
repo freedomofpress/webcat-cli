@@ -107,6 +107,27 @@ export async function publishBundle(dir: string, enrollment: Enrollment, documen
   return written;
 }
 
+// The enrollment the site serves is the one the chain follows, so a working tree without enrollment.json takes it from
+// there before anything is signed or inherited: an enrollment change is then a deploy of that one file, not a commit.
+export async function takeServedEnrollment(dir: string, origin: string): Promise<boolean> {
+  const pointer = path.join(dir, "enrollment.json");
+  if ((await readFile(pointer, "utf8").catch(() => null)) !== null) return false;
+  const url = `${origin.replace(/\/+$/, "")}/${WELL_KNOWN_DIR}/enrollment.json`;
+  const response = await fetch(url).catch((err) => {
+    throw external(`failed to fetch ${url}: ${causeOf(err)}`);
+  });
+  if (!response.ok) return false;
+  let enrollment: Enrollment;
+  try {
+    enrollment = parseEnrollmentObject(JSON.parse(await response.text()));
+  } catch {
+    return false; // a catch-all page
+  }
+  await mkdir(dir, { recursive: true });
+  await writeFile(pointer, pretty(enrollment));
+  return true;
+}
+
 // bundle-prev.json serves clients that still hold the old enrollment: the chain's cool-down, then everyone whose list
 // has not caught up. Once it has expired no client can accept it, so only then is it removed; its hash-named files
 // stay in the history.
@@ -313,6 +334,10 @@ async function copyHistory(from: string, dir: string): Promise<string[]> {
     if (HASH_FILE.test(name)) {
       if (await writeOnce(dir, name, content)) written.push(path.join(dir, name));
     } else if (name === "bundle.json" || name === "bundle-prev.json") {
+      await writeFile(path.join(dir, name), content);
+      written.push(path.join(dir, name));
+    } else if (name === "enrollment.json" && (await readFile(path.join(dir, name), "utf8").catch(() => null)) === null) {
+      // The pointer the oracles observe: a copy already in the working tree wins (an enrollment change), else the inherited one.
       await writeFile(path.join(dir, name), content);
       written.push(path.join(dir, name));
     }

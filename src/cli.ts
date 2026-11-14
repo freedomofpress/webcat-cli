@@ -11,7 +11,7 @@ import { type Enrollment, EnrollmentTypes, buildEnrollmentObject, canonicalizeEn
 import { auditDomain, formatAudit } from "./audit.js";
 import { DEFAULT_MAX_LOG_ENTRIES } from "./rekor.js";
 import { assertReleaseTag, gitDirtyFiles, gitPreviousTag, gitRoot, gitStage, gitTagAtHead } from "./git.js";
-import { WELL_KNOWN_DIR, archiveRelease, checkHistory, dropExpiredPrevious, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce } from "./history.js";
+import { WELL_KNOWN_DIR, archiveRelease, checkHistory, dropExpiredPrevious, enrollmentFileName, inheritFromSite, inheritHistory, publishBundle, writeOnce, takeServedEnrollment } from "./history.js";
 import {
   ManifestDocument,
   buildManifest,
@@ -727,6 +727,7 @@ program
   .description("Release the version HEAD is tagged with: inherit the history from the previous release's archive (or the live site), generate, sign and bundle the manifest, write the new archive")
   .option("-c, --config <path>", "Manifest config JSON file", "webcat.config.json")
   .option("-d, --directory <path>", "Directory with the built site (default: config.directory)")
+  .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collect)
   .addOption(typeOption("Signature"))
   .option("-k, --key <path>", "Sigsum signing key, repeatable up to the threshold (private key, or .pub held in ssh-agent)", collect)
   .option("--token-signing-key <path>", "Rate-limit token key for production Sigsum logs")
@@ -749,11 +750,14 @@ program
         const child = spawn(process.execPath, [...process.execArgv, process.argv[1], ...args], { stdio: "inherit" });
         child.on("exit", (code) => (code === 0 ? resolve() : reject(new CliError(`release stopped at: webcat ${args.join(" ")}`, code === 3 ? 3 : 2))));
       });
+    // Working tree, then the site, then the previous archive: where the enrollment to bundle comes from.
+    if (config.origin && (await takeServedEnrollment(WELL_KNOWN_DIR, config.origin))) log(`Took ${WELL_KNOWN_DIR}/enrollment.json from ${config.origin}: none in the working tree`);
     const work = await mkdtemp(path.join(tmpdir(), "webcat-release-"));
     const skip = options.skipGitChecks ? ["--skip-git-checks"] : [];
     const unsigned = path.join(work, "manifest.json");
     const signed = path.join(work, "manifest.signed.json");
-    await run("manifest", "generate", "--type", options.type, "-c", options.config, "-d", directory, "-o", unsigned, ...skip);
+    const exclude = (options.exclude ?? []).flatMap((p: string) => ["--exclude", p]);
+    await run("manifest", "generate", "--type", options.type, "-c", options.config, "-d", directory, "-o", unsigned, ...exclude, ...skip);
     if (options.type === "sigsum") {
       let input = unsigned;
       for (const key of options.key as string[]) {

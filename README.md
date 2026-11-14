@@ -231,8 +231,10 @@ nothing to run on purpose: the commands a release already goes through migrate a
 1. In `webcat.config.json`: drop `app`; add `source`, `artifact`, `directory` and `origin`
    (the site's https origin); make `version` a semantic version, or remove it and tag releases.
    `clean_urls: true` if the host serves `/page.html` at `/page` too.
-2. Move the enrollment to `.well-known/webcat/enrollment.json` if it lives elsewhere; it and
-   the `.well-known/webcat/` directory belong in the repository.
+2. Serve the enrollment at `.well-known/webcat/enrollment.json`. Nothing under `.well-known/webcat/`
+   needs to be in the repository: `release` takes `enrollment.json` from the working tree when it is
+   there, else from what `origin` serves, else from the previous release's archive, and the rest of
+   the directory from the archive.
 3. Fix the policy if `csp hint` rejects it; extension 3.3.0 requires a `sandbox` directive on a
    policy that can frame another origin.
 4. Tag and run `webcat release`, by hand or from the CI job `init` writes. The first
@@ -463,7 +465,7 @@ into it and never rewrites a hash-named file:
 
 | File | Written by |
 |------|-----------|
-| `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o` |
+| `enrollment.json`, `enrollment.<hash>.json` | `init`, `enrollment create -o`; `release` takes `enrollment.json` from the site or the previous archive when the working tree has none |
 | `bundle.json`, `manifest.sigsum.<checksum>.json` or `manifest.sigstore.<hash>.json` | `bundle create` |
 | `bundle-prev.json` | `bundle create`, when the enrollment changed since the previous bundle; `release` removes it once it has expired, when no client can accept it any more |
 | `hashes/<hash>` | `bundle create`, one per `fallback_hashes` entry, copied from the built site (`--directory`, or `directory` in the config) |
@@ -495,7 +497,9 @@ Without `version` in the config, the tag at HEAD is the version.
 A release is a tag. Work lands on branches as usual; when a commit is tagged, CI checks it out,
 builds the site, runs `webcat release`, uploads the archive where the `artifact` URL resolves
 and deploys the build directory with `.well-known/webcat/` inside. Nothing is pushed back to
-the repository, so the job needs no write access to it. Two things the checkout must provide:
+the repository, so the job needs no write access to it, and nothing under `.well-known/webcat/`
+has to be committed: the enrollment comes from the site (or the previous archive) and an enrollment
+change is a deploy of the new `enrollment.json` before the next tag, followed by `enrollment submit`. Two things the checkout must provide:
 the tag at HEAD, which is the version, and the previous tag, from which the history is inherited,
 so the clone must not be shallow.
 

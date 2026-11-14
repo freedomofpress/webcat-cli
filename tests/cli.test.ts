@@ -867,7 +867,7 @@ describe("history", () => {
     try {
       const next = path.join(await mkdtemp(path.join(tmpdir(), "webcat-next-")), ".well-known/webcat");
       const written = await inheritHistory(next, `${base}/good.tgz`);
-      expect(written.map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect(written.map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json", "enrollment.json"].sort());
       expect(await checkHistory(next)).toEqual([]);
       // Inheriting again only refreshes the pointer; hash-named files are already there.
       expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
@@ -877,7 +877,7 @@ describe("history", () => {
       verify.mockResolvedValueOnce(new WebcatError(WebcatErrorCode.Manifest.EXPIRED));
       expect((await inheritHistory(next, `${base}/good.tgz`)).map((f) => path.basename(f))).toEqual(["bundle.json"]);
       // An archive from the old CLI carries only the pointers: the hash-named files are derived from them.
-      const { materializeHistory, inheritFromSite, publishEnrollment: _pe } = await import("../src/history");
+      const { materializeHistory, inheritFromSite, takeServedEnrollment } = await import("../src/history");
       const legacyRoot = await mkdtemp(path.join(tmpdir(), "webcat-legacy-"));
       const legacyWellKnown = path.join(legacyRoot, ".well-known/webcat");
       await mkdir(legacyWellKnown, { recursive: true });
@@ -887,7 +887,7 @@ describe("history", () => {
       await writeFile(path.join(site, "index.html"), content); // back to what the manifest says
       await archiveRelease(path.join(archives, "legacy.tgz"), site, legacyWellKnown);
       const fromLegacy = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromlegacy-")), ".well-known/webcat");
-      expect((await inheritHistory(fromLegacy, `${base}/legacy.tgz`)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+      expect((await inheritHistory(fromLegacy, `${base}/legacy.tgz`)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json", "enrollment.json"].sort());
       expect(await checkHistory(fromLegacy)).toEqual([]);
       // The live site as the source: what it serves under the well-known path, materialized the same way.
       const siteServer = createServer(async (req, res) => {
@@ -902,8 +902,17 @@ describe("history", () => {
       const origin = `http://127.0.0.1:${(siteServer.address() as { port: number }).port}`;
       try {
         const fromSite = path.join(await mkdtemp(path.join(tmpdir(), "webcat-fromsite-")), ".well-known/webcat");
-        expect((await inheritFromSite(fromSite, origin)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json"].sort());
+        expect((await inheritFromSite(fromSite, origin)).map((f) => path.basename(f)).sort()).toEqual([enrollmentFileName(enrollment), manifestFileName(enrollment, document), "bundle.json", "enrollment.json"].sort());
         expect(await checkHistory(fromSite)).toEqual([]);
+        // The enrollment pointer: the site's when the working tree has none, the working tree's own otherwise.
+        const bare = path.join(await mkdtemp(path.join(tmpdir(), "webcat-bare-")), ".well-known/webcat");
+        expect(await takeServedEnrollment(bare, origin)).toBe(true);
+        expect(JSON.parse(await readFile(path.join(bare, "enrollment.json"), "utf8"))).toEqual(JSON.parse(JSON.stringify(enrollment)));
+        await writeFile(path.join(bare, "enrollment.json"), "{\"own\":true}\n");
+        expect(await takeServedEnrollment(bare, origin)).toBe(false);
+        expect((await inheritHistory(bare, `${base}/good.tgz`)).map((f) => path.basename(f))).not.toContain("enrollment.json");
+        expect(await readFile(path.join(bare, "enrollment.json"), "utf8")).toBe("{\"own\":true}\n");
+        expect(await takeServedEnrollment(bare, `${origin}/nowhere`)).toBe(false); // nothing served: nothing taken
         // The site must serve the previous release when one is named: an older one would drop that release from history.
         await expect(inheritFromSite(fromSite, origin, "v2.0.0")).rejects.toThrow(/is version 1\.0\.0, the previous release is v2\.0\.0/);
         await inheritFromSite(fromSite, origin, "v1.0.0");

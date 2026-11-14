@@ -311,6 +311,7 @@ export async function runInit(options: InitOptions): Promise<void> {
   stdout.write(`
 Next steps${dns}
   1. Serve ${WELL_KNOWN_DIR}/ at ${a.origin}/${WELL_KNOWN_DIR}/
+     (release takes enrollment.json from there, or from the previous release's archive, so it need not be committed)
   2. Send this header on every response, byte for byte:
        Content-Security-Policy: ${a.csp}
   3. Build the site into ${a.directory}/, tag the release, then publish it in one step:
