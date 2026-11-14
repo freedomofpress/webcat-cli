@@ -6,7 +6,7 @@ import type { WebcatError } from "@freedomofpress/webcat/webcat/interfaces/error
 // - exit 1: the command ran and the answer is negative (verification failed); set via process.exitCode
 // - exit 2: invalid input, fix the command line or the file  -> throw invalid(...)
 // - exit 3: an external service, tool or the environment failed -> throw external(...)
-// Message shape, always lowercase except proper nouns (Sigsum, Sigstore, OIDC, TUF, CAS, URL, OID, SAN, JSON):
+// Message shape, always lowercase except proper nouns (Sigsum, Sigstore, OIDC, TUF, URL, OID, SAN, JSON):
 //   "<subject> must <rule>"             validation       subject = CLI flag (--max-age) or JSON path from the file role (enrollment.max_age, config.app)
 //   "<subject> is required for <ctx>"   missing input
 //   "<role> file not found: <path>"     missing file
@@ -131,18 +131,6 @@ export function parseInteger(value: number | string, name: string): number {
 export function validateMaxAge(maxAge: number, name: string): void {
   if (maxAge <= WEEK_SECONDS || maxAge >= YEAR_SECONDS) {
     throw invalid(`${name} must be between one week and one year, in seconds`);
-  }
-}
-
-export function validateCasUrl(urlString: string, name: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(urlString);
-  } catch (err) {
-    throw invalid(`${name} must be a valid URL: ${causeOf(err)}`);
-  }
-  if (parsed.protocol !== "https:") {
-    throw invalid(`${name} must use https://`);
   }
 }
 

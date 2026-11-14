@@ -1,4 +1,5 @@
 // Runs the real command line (not the helpers) over the examples: the layer unit tests cannot see.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -21,6 +22,13 @@ describe("command line", () => {
     expect(webcat("enrollment", "hash", "-i", "examples/enrollment.json").code).toBe(0);
   });
 
+  it("bundle create migrates the enrollment to schema 1 and leaves the signed manifest alone", () => {
+    const out = path.join(tmpdir(), `webcat-smoke-${process.pid}.json`);
+    const { code } = webcat("bundle", "create", "-e", "examples/enrollment.json", "-m", "examples/manifest.json", "-o", out);
+    const bundle = JSON.parse(readFileSync(out, "utf8"));
+    expect([code, bundle.enrollment.enrollment_schema, "cas_url" in bundle.enrollment, bundle.manifest.manifest_schema]).toEqual([0, 1, false, undefined]);
+  });
+
   it("verifies the example bundle with the extension's verifier", () => {
     const { stdout, code } = webcat("manifest", "verify", "examples/bundle.json");
     // The fixture ages: a verified window today, an expiry code once it is a year old.
@@ -37,7 +45,7 @@ describe("command line", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-smoke-"));
     await writeFile(path.join(dir, "index.html"), "<h1>hi</h1>");
     const config = path.join(await mkdtemp(path.join(tmpdir(), "webcat-smoke-cfg-")), "webcat.config.json"); // outside the scanned dir
-    await writeFile(config, JSON.stringify({ app: "https://example.org", version: "1", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html" }));
+    await writeFile(config, JSON.stringify({ app: "https://example.org", version: "1.0.0", default_csp: "default-src 'none'", default_index: "index.html", default_fallback: "/index.html" }));
     const { stdout, code } = webcat("manifest", "generate", "--type", "sigstore", "-c", config, "-d", dir);
     expect(code).toBe(0);
     expect(Object.keys(JSON.parse(stdout).manifest.files)).toEqual(["/", "/index.html"]);
@@ -47,7 +55,6 @@ describe("command line", () => {
     const { stdout, code } = webcat("enrollment", "create", "-p", "/nonexistent");
     expect(code).toBe(2);
     expect(stdout).toContain("--signer is required");
-    expect(stdout).toContain("--cas-url is required");
   });
 
   it("maps usage errors to exit 2 and prints a version", () => {

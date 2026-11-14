@@ -131,12 +131,16 @@ async function fetchBundle(url: string): Promise<{ bundle?: BundleDocument; verd
   if (!response.ok) {
     throw external(`failed to fetch ${url}: HTTP ${response.status} ${response.statusText}`);
   }
+  // Catch-all servers answer every path with a page: no bundle there, as opposed to a broken one.
+  const parsed = await response.json().catch(() => null);
+  if (!parsed?.enrollment || !parsed?.manifest) {
+    return { verdict: "FAILED: not a bundle", notBundle: `the server answered HTTP ${response.status} ${response.headers.get("content-type") ?? "without a content type"}` };
+  }
   let bundle: BundleDocument;
   try {
-    bundle = parseBundleObject(await response.json(), url);
+    bundle = parseBundleObject(parsed, url);
   } catch (err) {
-    // Catch-all servers answer every path with a page: no bundle there, as opposed to a broken one.
-    return { verdict: `FAILED: ${causeOf(err)}`, notBundle: `the server answered HTTP ${response.status} ${response.headers.get("content-type") ?? "without a content type"}` };
+    return { verdict: `FAILED: ${causeOf(err)}` };
   }
   const result = await verifyBundle(bundle);
   const verdict = result instanceof WebcatError ? `FAILED: ${describeWebcatError(result)}` : `VERIFIED (${describeValidity(result)})`;

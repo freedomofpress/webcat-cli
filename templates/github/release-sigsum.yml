@@ -1,0 +1,44 @@
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+# Secrets: SIGSUM_KEY, the private signing key{{#token}}; SIGSUM_TOKEN_KEY, the rate-limit token key{{/token}}.
+name: WEBCAT release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write     # upload the archive to the release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - run: npm ci && npm run build                          # must produce {{directory}}/
+      - run: npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+      - run: |
+          install -m 600 /dev/stdin keys/key1 <<< "$SIGSUM_KEY"
+{{#token}}
+          install -m 600 /dev/stdin keys/token <<< "$SIGSUM_TOKEN_KEY"
+{{/token}}
+        env:
+          SIGSUM_KEY: ${{ secrets.SIGSUM_KEY }}
+{{#token}}
+          SIGSUM_TOKEN_KEY: ${{ secrets.SIGSUM_TOKEN_KEY }}
+{{/token}}
+      - run: webcat release -k keys/key1{{#token}} --token-signing-key keys/token --token-domain {{host}}{{/token}}
+{{#artifact}}
+      - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+{{/artifact}}
+      - run: cp -r .well-known {{directory}}/
+      # deploy {{directory}}/ as usual; webcat-verify.yml then checks what visitors and auditors see

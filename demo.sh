@@ -41,7 +41,7 @@ cat > webcat.config.json <<EOF
 EOF
 
 # Create enrollment.json
-webcat enrollment create --policy-file trust_policy --threshold 1 --max-age 15552000 --cas-url https://cas.demoelement.com --signer "$HEX1" --signer "$HEX2" --output enrollment.json
+webcat enrollment create --policy-file trust_policy --threshold 1 --max-age 15552000 --signer "$HEX1" --signer "$HEX2" --output enrollment.json
 jq . < enrollment.json
 
 # View the WEBCAT config file

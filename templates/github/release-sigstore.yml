@@ -1,0 +1,30 @@
+# Written by webcat init. A pushed tag is a release: build, sign, publish the archive, deploy.
+# The clone must carry the tags: the tag at HEAD is the version, the previous tag is where the history is inherited from.
+name: WEBCAT release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write     # upload the archive to the release
+  id-token: write     # the Sigstore identity the enrollment names
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build                          # must produce {{directory}}/
+      - run: npm install -g @freedomofpress/webcat-cli@{{cli_version}}
+      - run: webcat release --type sigstore
+{{#artifact}}
+      - run: gh release create "$GITHUB_REF_NAME" site-*.tar.gz --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+{{/artifact}}
+      - run: cp -r .well-known {{directory}}/
+      # deploy {{directory}}/ as usual; webcat-verify.yml then checks what visitors and auditors see

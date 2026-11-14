@@ -7,7 +7,6 @@ import {
   CIContextProvider,
   DEFAULT_FULCIO_URL,
   DEFAULT_REKOR_URL,
-  DSSEBundleBuilder,
   FulcioSigner,
   MessageSignatureBundleBuilder,
   RekorWitness,
@@ -213,7 +212,6 @@ export async function fetchInteractiveOidcToken(options: OidcDeviceFlowOptions):
 // Signing
 
 export interface SigstoreSignOptions {
-  bundleType: "message" | "dsse";
   fulcioUrl: string;
   rekorUrl?: string;
   rekorApiVersion: 1 | 2;
@@ -241,8 +239,7 @@ export async function signManifestWithSigstore(document: ManifestDocument, optio
   if (tsaUrl) {
     witnesses.push(new TSAWitness({ tsaBaseURL: tsaUrl }));
   }
-  const builder =
-    options.bundleType === "dsse" ? new DSSEBundleBuilder({ signer, witnesses }) : new MessageSignatureBundleBuilder({ signer, witnesses });
+  const builder = new MessageSignatureBundleBuilder({ signer, witnesses });
   const bundle = await builder.create({ data: Buffer.from(canonicalizeManifestBody(document)), type: "application/json" }).catch((err) => {
     throw external(`failed to sign with Sigstore: ${causeOf(err)}`);
   });
